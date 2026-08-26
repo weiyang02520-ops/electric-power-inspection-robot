@@ -104,6 +104,8 @@ install(TARGETS
 install(PROGRAMS
   scripts/vision_node.py
   scripts/auto_align.py
+  scripts/lidar_robust_features.py
+  scripts/lidar_robust_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -161,6 +163,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_slam_config test/test_slam_config.py)
   ament_add_pytest_test(test_nav2_localization_config test/test_nav2_localization_config.py)
   ament_add_pytest_test(test_scan_map_relocalization test/test_scan_map_relocalization.py)
+  ament_add_pytest_test(test_lidar_robust_features test/test_lidar_robust_features.py)
 endif()
 
 ament_package()
