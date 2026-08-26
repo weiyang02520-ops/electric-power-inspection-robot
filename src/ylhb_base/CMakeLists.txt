@@ -106,6 +106,8 @@ install(PROGRAMS
   scripts/auto_align.py
   scripts/lidar_robust_features.py
   scripts/lidar_robust_node.py
+  scripts/gnss_quality_gate.py
+  scripts/gnss_quality_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -164,6 +166,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_nav2_localization_config test/test_nav2_localization_config.py)
   ament_add_pytest_test(test_scan_map_relocalization test/test_scan_map_relocalization.py)
   ament_add_pytest_test(test_lidar_robust_features test/test_lidar_robust_features.py)
+  ament_add_pytest_test(test_gnss_quality_gate test/test_gnss_quality_gate.py)
 endif()
 
 ament_package()
