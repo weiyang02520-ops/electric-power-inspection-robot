@@ -69,6 +69,54 @@ def _bool_value(values: dict[str, str], key: str, default: bool = False) -> bool
     return raw.strip().lower() in {"1", "true", "yes", "accepted", "ok"}
 
 
+def parse_required_signals(value: Any) -> tuple[str, ...]:
+    """Normalize a ROS string-array parameter for the ROS-free core."""
+    if isinstance(value, str):
+        value = (value,)
+    return tuple(str(item).strip() for item in (value or ()) if str(item).strip())
+
+
+def parse_match_quality_values(
+    values: dict[str, str],
+    received_time: float,
+    default_reason: str = "",
+) -> CandidateQuality:
+    """Convert a match diagnostic into a candidate, preserving failures.
+
+    Failure diagnostics intentionally use finite sentinel values because ROS
+    diagnostic fields are strings but the core uses numeric quality fields.
+    An accepted diagnostic with a non-finite/missing quality is converted into
+    an explicit rejected candidate instead of being silently discarded.
+    """
+    accepted = _bool_value(values, "accepted", default=True)
+    reason = _value(values, "reason") or default_reason
+    timestamp = _float_value(values, "timestamp")
+    score = _float_value(values, "score")
+    inlier_ratio = _float_value(values, "inlier_ratio")
+    mean_distance = _float_value(values, "mean_distance")
+    x = _float_value(values, "candidate_x")
+    y = _float_value(values, "candidate_y")
+    yaw = _float_value(values, "candidate_yaw")
+
+    if accepted and None in (score, inlier_ratio, mean_distance, x, y, yaw):
+        accepted = False
+        reason = reason or "NONFINITE_MATCH_QUALITY"
+
+    return CandidateQuality(
+        timestamp=timestamp if timestamp is not None else received_time,
+        score=score if score is not None else 0.0,
+        inlier_ratio=inlier_ratio if inlier_ratio is not None else 0.0,
+        mean_distance=mean_distance if mean_distance is not None else 1_000_000.0,
+        x=x if x is not None else 0.0,
+        y=y if y is not None else 0.0,
+        yaw=yaw if yaw is not None else 0.0,
+        used_points=_int_value(values, "used_points"),
+        accepted=accepted,
+        reason=reason or ("ACCEPTED" if accepted else "MATCH_REJECTED"),
+        received_time=received_time,
+    )
+
+
 def _quaternion_yaw(orientation: Any) -> float | None:
     try:
         x = float(orientation.x)
@@ -183,6 +231,7 @@ def create_node(node_name: str) -> Any:
                 "lidar_quality_topic": "/dg/lidar/quality",
                 "gnss_quality_topic": "/dg/gnss/quality",
                 "match_quality_topic": "/dg/relocalization/match_quality",
+                "required_signals": [],
                 "seed_topic": "/dg/relocalization/seed",
                 "seed_frame_id": "map",
                 "manual_topic": "/dg/relocalization/manual_takeover",
@@ -227,6 +276,7 @@ def create_node(node_name: str) -> Any:
                 "suspect_duration": float(parameter("suspect_duration").value),
                 "trigger_duration": float(parameter("trigger_duration").value),
                 "healthy_recovery_duration": float(parameter("healthy_recovery_duration").value),
+                "required_signals": parse_required_signals(parameter("required_signals").value),
                 "max_covariance": float(parameter("max_covariance").value),
                 "min_lidar_quality": float(parameter("min_lidar_quality").value),
                 "min_scan_match_score": float(parameter("min_scan_match_score").value),
@@ -309,31 +359,11 @@ def create_node(node_name: str) -> Any:
             self._scan_match_inlier_ratio = None
             self._scan_match_mean_distance = None
             values = {str(item.key): str(item.value) for item in selected.values}
-            score = _float_value(values, "score")
-            inlier = _float_value(values, "inlier_ratio")
-            mean_distance = _float_value(values, "mean_distance")
-            x = _float_value(values, "candidate_x")
-            y = _float_value(values, "candidate_y")
-            yaw = _float_value(values, "candidate_yaw")
-            if None in (score, inlier, mean_distance, x, y, yaw):
-                return
-            self._scan_match_score = score
-            self._scan_match_inlier_ratio = inlier
-            self._scan_match_mean_distance = mean_distance
-            timestamp = _float_value(values, "timestamp")
-            self._candidate = CandidateQuality(
-                timestamp=self._now() if timestamp is None else timestamp,
-                score=float(score),
-                inlier_ratio=float(inlier),
-                mean_distance=float(mean_distance),
-                x=float(x),
-                y=float(y),
-                yaw=float(yaw),
-                used_points=_int_value(values, "used_points"),
-                accepted=_bool_value(values, "accepted", default=True),
-                reason=_value(values, "reason") or str(selected.message),
-                received_time=received_time,
-            )
+            parsed = parse_match_quality_values(values, received_time, str(selected.message))
+            self._scan_match_score = parsed.score
+            self._scan_match_inlier_ratio = parsed.inlier_ratio
+            self._scan_match_mean_distance = parsed.mean_distance
+            self._candidate = parsed
             self._candidate_received_at = received_time
             self._candidate_sequence += 1
 

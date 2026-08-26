@@ -26,6 +26,7 @@ from active_relocalization_core import (  # noqa: E402
     SupervisorInput,
     assess_health,
 )
+from active_relocalization_node import parse_match_quality_values, parse_required_signals  # noqa: E402
 
 
 def healthy(**changes: object) -> LocalizationHealth:
@@ -139,13 +140,46 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
     def test_old_good_scan_match_is_marked_stale_and_does_not_trigger_alone(self) -> None:
         assessment = assess_health(healthy(scan_match_fresh=False), config())
         self.assertFalse(assessment.triggerable)
-        self.assertTrue(assessment.degraded)
+        self.assertFalse(assessment.degraded)
         self.assertIn("SCAN_MATCH_STALE", assessment.reasons)
 
     def test_required_stale_signal_can_trigger_by_configuration(self) -> None:
         required = config(required_signals=("lidar", "gnss", "scan_match"))
         assessment = assess_health(healthy(lidar_fresh=False, gnss_fresh=False, scan_match_fresh=False), required)
         self.assertTrue(assessment.triggerable)
+
+    def test_optional_stale_signals_do_not_make_overall_health_degraded(self) -> None:
+        for stale_field in ("lidar_fresh", "gnss_fresh", "scan_match_fresh"):
+            assessment = assess_health(healthy(**{stale_field: False}), config())
+            self.assertFalse(assessment.degraded, stale_field)
+
+    def test_suspected_recovers_with_only_optional_stale_signals(self) -> None:
+        controller = ActiveRelocalizationController(config(healthy_recovery_samples=2))
+        bad = healthy(amcl_covariance=1.0)
+        controller.process(SupervisorInput(0.0, bad))
+        self.assertEqual(controller.process(SupervisorInput(0.1, bad)).state, SUSPECTED)
+        stale = healthy(lidar_fresh=False, gnss_fresh=False, scan_match_fresh=False)
+        self.assertEqual(controller.process(SupervisorInput(0.2, stale)).state, SUSPECTED)
+        self.assertEqual(controller.process(SupervisorInput(0.3, stale)).state, NORMAL)
+
+    def test_last_trusted_pose_updates_while_optional_signals_are_stale(self) -> None:
+        controller = ActiveRelocalizationController(config())
+        controller.process(SupervisorInput(0.0, healthy(pose_x=1.0, pose_y=2.0, pose_yaw=0.1)))
+        controller.process(SupervisorInput(0.1, healthy(pose_x=3.0, pose_y=4.0, pose_yaw=0.2, lidar_fresh=False, gnss_fresh=False, scan_match_fresh=False)))
+        self.assertEqual(controller.last_trusted_pose, (3.0, 4.0, 0.2))
+
+    def test_required_lidar_stale_is_triggerable(self) -> None:
+        self.assertTrue(assess_health(healthy(lidar_fresh=False), config(required_signals=("lidar",))).triggerable)
+
+    def test_required_gnss_stale_is_triggerable(self) -> None:
+        self.assertTrue(assess_health(healthy(gnss_fresh=False), config(required_signals=("gnss",))).triggerable)
+
+    def test_required_scan_match_stale_is_triggerable(self) -> None:
+        self.assertTrue(assess_health(healthy(scan_match_fresh=False), config(required_signals=("scan_match",))).triggerable)
+
+    def test_required_signals_parameter_normalization(self) -> None:
+        self.assertEqual(parse_required_signals(["lidar", "gnss", "", "scan_match"]), ("lidar", "gnss", "scan_match"))
+        self.assertEqual(parse_required_signals("amcl"), ("amcl",))
 
     def test_scan_match_or_amcl_bad_health_is_triggerable(self) -> None:
         self.assertTrue(assess_health(healthy(scan_match_score=0.1), config()).triggerable)
@@ -230,6 +264,38 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
         )
         self.assertEqual(output.state, ACTIVE_SCAN)
         self.assertEqual(output.active_segment, 2)
+
+    def test_failed_match_feedback_with_infinite_distance_is_preserved(self) -> None:
+        parsed = parse_match_quality_values(
+            {"accepted": "false", "reason": "NO_MAP", "score": "0", "inlier_ratio": "0", "mean_distance": "inf"},
+            received_time=0.9,
+        )
+        self.assertFalse(parsed.accepted)
+        self.assertEqual(parsed.reason, "NO_MAP")
+        self.assertTrue(math.isfinite(parsed.mean_distance))
+
+    def test_failure_feedback_immediately_enters_failure_handling(self) -> None:
+        for reason in ("NO_MAP", "NO_SCAN", "TF_FAILED", "NO_VALID_POINTS"):
+            controller = ActiveRelocalizationController(config())
+            self.request_candidate(controller)
+            output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.1, candidate=candidate(accepted=False, reason=reason, received_time=0.9)))
+            self.assertEqual(output.failure_reason, reason)
+            self.assertEqual(output.state, ACTIVE_SCAN, reason)
+
+    def test_quality_rejection_feedback_immediately_enters_next_segment(self) -> None:
+        for reason in ("SCORE_LOW", "INLIER_LOW", "MEAN_DISTANCE_HIGH"):
+            controller = ActiveRelocalizationController(config())
+            self.request_candidate(controller)
+            output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.1, candidate=candidate(accepted=False, reason=reason, received_time=0.9)))
+            self.assertEqual(output.state, ACTIVE_SCAN, reason)
+
+    def test_accepted_candidate_with_nonfinite_score_becomes_rejected(self) -> None:
+        parsed = parse_match_quality_values(
+            {"accepted": "true", "score": "nan", "inlier_ratio": "0.8", "mean_distance": "0.1", "candidate_x": "0", "candidate_y": "0", "candidate_yaw": "0"},
+            received_time=0.9,
+        )
+        self.assertFalse(parsed.accepted)
+        self.assertEqual(parsed.reason, "NONFINITE_MATCH_QUALITY")
 
     def test_active_scan_rejects_stale_scan(self) -> None:
         controller = ActiveRelocalizationController(config())

@@ -522,13 +522,21 @@ def main(args=None):
                 yaw_from_quaternion(pose.orientation),
             )
             self._publish_match_quality(
-                MatchScore(0.0, float("inf"), 0.0, 0),
+                MatchScore(0.0, 1_000_000.0, 0.0, 0),
                 seed,
                 accepted=False,
                 reason=reason,
             )
 
         def _publish_match_quality(self, score, pose, accepted, reason):
+            finite_score = score.score if math.isfinite(score.score) else 0.0
+            finite_mean_distance = (
+                score.mean_distance if math.isfinite(score.mean_distance) else 1_000_000.0
+            )
+            finite_inlier_ratio = (
+                score.inlier_ratio if math.isfinite(score.inlier_ratio) else 0.0
+            )
+            finite_pose = tuple(value if math.isfinite(value) else 0.0 for value in pose)
             array = DiagnosticArray()
             array.header.stamp = self.get_clock().now().to_msg()
             status = DiagnosticStatus()
@@ -537,13 +545,13 @@ def main(args=None):
             status.message = reason
             status.values = [
                 KeyValue(key="accepted", value=str(bool(accepted))),
-                KeyValue(key="score", value=str(score.score)),
-                KeyValue(key="mean_distance", value=str(score.mean_distance)),
-                KeyValue(key="inlier_ratio", value=str(score.inlier_ratio)),
+                KeyValue(key="score", value=str(finite_score)),
+                KeyValue(key="mean_distance", value=str(finite_mean_distance)),
+                KeyValue(key="inlier_ratio", value=str(finite_inlier_ratio)),
                 KeyValue(key="used_points", value=str(score.used_points)),
-                KeyValue(key="candidate_x", value=str(pose[0])),
-                KeyValue(key="candidate_y", value=str(pose[1])),
-                KeyValue(key="candidate_yaw", value=str(pose[2])),
+                KeyValue(key="candidate_x", value=str(finite_pose[0])),
+                KeyValue(key="candidate_y", value=str(finite_pose[1])),
+                KeyValue(key="candidate_yaw", value=str(finite_pose[2])),
                 KeyValue(key="reason", value=reason),
                 KeyValue(
                     key="timestamp",

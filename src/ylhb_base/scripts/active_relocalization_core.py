@@ -243,8 +243,6 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         scan_match_health = "STALE"
         if _required(config, "scan_match", "scan_match_fresh"):
             trigger_reasons.append("SCAN_MATCH_STALE")
-        else:
-            degraded_reasons.append("SCAN_MATCH_STALE")
     elif health.scan_match_fresh is None and _required(config, "scan_match", "scan_match_fresh"):
         reasons.append("SCAN_MATCH_FRESHNESS_MISSING")
         trigger_reasons.append("SCAN_MATCH_FRESHNESS_MISSING")
@@ -275,8 +273,6 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         lidar_health = "STALE"
         if _required(config, "lidar", "lidar_fresh"):
             trigger_reasons.append("LIDAR_STALE")
-        else:
-            degraded_reasons.append("LIDAR_STALE")
     elif health.lidar_fresh is None and _required(config, "lidar", "lidar_fresh"):
         reasons.append("LIDAR_FRESHNESS_MISSING")
         trigger_reasons.append("LIDAR_FRESHNESS_MISSING")
@@ -293,8 +289,6 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         gnss_health = "STALE"
         if _required(config, "gnss", "gnss_fresh"):
             trigger_reasons.append("GNSS_STALE")
-        else:
-            degraded_reasons.append("GNSS_STALE")
     elif health.gnss_fresh is None and _required(config, "gnss", "gnss_fresh"):
         reasons.append("GNSS_FRESHNESS_MISSING")
         trigger_reasons.append("GNSS_FRESHNESS_MISSING")
