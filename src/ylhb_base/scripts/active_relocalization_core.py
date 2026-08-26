@@ -38,6 +38,9 @@ class LocalizationHealth:
     scan_fresh: bool | None = None
     odom_fresh: bool | None = None
     amcl_fresh: bool | None = None
+    lidar_fresh: bool | None = None
+    gnss_fresh: bool | None = None
+    scan_match_fresh: bool | None = None
     odom_linear_velocity: float | None = None
     odom_angular_velocity: float | None = None
     pose_x: float | None = None
@@ -55,6 +58,9 @@ class CandidateQuality:
     y: float
     yaw: float
     used_points: int = 0
+    accepted: bool = True
+    reason: str = ""
+    received_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,10 @@ class SupervisorOutput:
     failure_reason: str
     manual_takeover: bool
     health_reasons: tuple[str, ...]
+    request_candidate: bool
+    candidate_request_time: float | None
+    seed_source: str
+    seed_pose: tuple[float, float, float] | None
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,10 @@ def _distance_2d(x1: float | None, y1: float | None, x2: float | None, y2: float
     return math.hypot(float(x2) - float(x1), float(y2) - float(y1))
 
 
+def _required(config: ActiveRelocalizationConfig, *names: str) -> bool:
+    return any(name in config.required_signals for name in names)
+
+
 def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizationConfig) -> _HealthAssessment:
     if health is None:
         return _HealthAssessment(False, True, ("HEALTH_INPUT_MISSING",), "UNKNOWN", "UNKNOWN", "UNKNOWN")
@@ -200,6 +214,10 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         reasons.append("AMCL_STALE")
         trigger_reasons.append("AMCL_STALE")
         amcl_health = "BAD"
+    elif health.amcl_fresh is None and _required(config, "amcl", "amcl_fresh"):
+        reasons.append("AMCL_FRESHNESS_MISSING")
+        trigger_reasons.append("AMCL_FRESHNESS_MISSING")
+        amcl_health = "BAD"
 
     if health.scan_match_score is None or health.scan_match_inlier_ratio is None or health.scan_match_mean_distance is None:
         if "scan_match_score" in config.required_signals:
@@ -220,6 +238,16 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         scan_match_health = "BAD"
     else:
         scan_match_health = "GOOD"
+    if health.scan_match_fresh is False:
+        reasons.append("SCAN_MATCH_STALE")
+        scan_match_health = "STALE"
+        if _required(config, "scan_match", "scan_match_fresh"):
+            trigger_reasons.append("SCAN_MATCH_STALE")
+        else:
+            degraded_reasons.append("SCAN_MATCH_STALE")
+    elif health.scan_match_fresh is None and _required(config, "scan_match", "scan_match_fresh"):
+        reasons.append("SCAN_MATCH_FRESHNESS_MISSING")
+        trigger_reasons.append("SCAN_MATCH_FRESHNESS_MISSING")
     if health.scan_fresh is False:
         reasons.append("SCAN_STALE")
         trigger_reasons.append("SCAN_STALE")
@@ -242,6 +270,16 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
         lidar_health = "DEGRADED"
     else:
         lidar_health = "GOOD"
+    if health.lidar_fresh is False:
+        reasons.append("LIDAR_STALE")
+        lidar_health = "STALE"
+        if _required(config, "lidar", "lidar_fresh"):
+            trigger_reasons.append("LIDAR_STALE")
+        else:
+            degraded_reasons.append("LIDAR_STALE")
+    elif health.lidar_fresh is None and _required(config, "lidar", "lidar_fresh"):
+        reasons.append("LIDAR_FRESHNESS_MISSING")
+        trigger_reasons.append("LIDAR_FRESHNESS_MISSING")
 
     gnss_health = str(health.gnss_quality or "UNKNOWN").upper()
     if gnss_health == "REJECTED":
@@ -250,6 +288,16 @@ def assess_health(health: LocalizationHealth | None, config: ActiveRelocalizatio
     elif gnss_health == "DEGRADED":
         reasons.append("GNSS_DEGRADED")
         degraded_reasons.append("GNSS_DEGRADED")
+    if health.gnss_fresh is False:
+        reasons.append("GNSS_STALE")
+        gnss_health = "STALE"
+        if _required(config, "gnss", "gnss_fresh"):
+            trigger_reasons.append("GNSS_STALE")
+        else:
+            degraded_reasons.append("GNSS_STALE")
+    elif health.gnss_fresh is None and _required(config, "gnss", "gnss_fresh"):
+        reasons.append("GNSS_FRESHNESS_MISSING")
+        trigger_reasons.append("GNSS_FRESHNESS_MISSING")
 
     reasons = list(dict.fromkeys(reasons))
     return _HealthAssessment(
@@ -289,13 +337,18 @@ class ActiveRelocalizationController:
         self.verification_count = 0
         self.last_verify_pose: tuple[float, float, float] | None = None
         self.candidate: CandidateQuality | None = None
+        self.last_trusted_pose: tuple[float, float, float] | None = None
+        self.seed_source = "NONE"
+        self.seed_pose: tuple[float, float, float] | None = None
+        self.candidate_request_time: float | None = None
+        self.candidate_requested_for_segment = False
         self._manual_latched = False
         self._shutdown_latched = False
 
     def process(self, event: SupervisorInput) -> SupervisorOutput:
         if event.scan_updated:
             self.last_scan_time = event.now
-        if event.candidate is not None:
+        if event.candidate is not None and self._candidate_is_fresh(event.candidate):
             self.candidate = event.candidate
         if event.manual_takeover:
             self._manual_latched = True
@@ -311,6 +364,10 @@ class ActiveRelocalizationController:
             return self._output(event, None, ("SHUTDOWN",))
 
         assessment = assess_health(event.health, self.config)
+        if self.state == NORMAL and not assessment.degraded and event.health is not None:
+            trusted_pose = self._pose_from_health(event.health)
+            if trusted_pose is not None:
+                self.last_trusted_pose = trusted_pose
         if self.state in {NORMAL, SUSPECTED}:
             self._update_trigger_state(assessment, event.now)
             if self.state in {NORMAL, SUSPECTED}:
@@ -397,10 +454,10 @@ class ActiveRelocalizationController:
         if not _finite(event.current_yaw):
             self._fail("YAW_MISSING")
             return self._output(event, assessment, ("YAW_MISSING",))
-        self._begin_attempt(event.now, float(event.current_yaw))
+        self._begin_attempt(event.now, float(event.current_yaw), event.health)
         return self._output(event, assessment, ("STOP_CONFIRMED",))
 
-    def _begin_attempt(self, now: float, yaw: float) -> None:
+    def _begin_attempt(self, now: float, yaw: float, health: LocalizationHealth | None) -> None:
         self.attempt_id += 1
         self.attempt_started = now
         self.segment_index = 0
@@ -413,6 +470,18 @@ class ActiveRelocalizationController:
         self.verification_count = 0
         self.last_verify_pose = None
         self.candidate = None
+        self.candidate_request_time = None
+        self.candidate_requested_for_segment = False
+        current_pose = None if health is None else self._pose_from_health(health)
+        if self.last_trusted_pose is not None:
+            self.seed_source = "LAST_TRUSTED"
+            self.seed_pose = self.last_trusted_pose
+        elif current_pose is not None:
+            self.seed_source = "CURRENT_AMCL"
+            self.seed_pose = current_pose
+        else:
+            self.seed_source = "NONE"
+            self.seed_pose = None
         self.state = ACTIVE_SCAN
 
     def _handle_active_scan(self, event: SupervisorInput, assessment: _HealthAssessment) -> SupervisorOutput:
@@ -425,11 +494,13 @@ class ActiveRelocalizationController:
         if event.health.scan_fresh is False:
             self._fail("SCAN_STALE_DURING_ACTIVE_SCAN")
             return self._output(event, assessment, ("SCAN_STALE_DURING_ACTIVE_SCAN",))
-        if self.candidate is not None and self._candidate_is_good(self.candidate):
-            self.state = VERIFYING
-            self.verification_count = 0
-            self.last_verify_pose = None
-            return self._output(event, assessment, ("CANDIDATE_RECEIVED",))
+        if self.candidate is not None:
+            if self.candidate.accepted and self._candidate_is_good(self.candidate):
+                self.state = VERIFYING
+                self.verification_count = 0
+                self.last_verify_pose = None
+                return self._output(event, assessment, ("CANDIDATE_RECEIVED",))
+            return self._candidate_failed(event, assessment, self.candidate.reason or "CANDIDATE_QUALITY_LOW")
         if not _finite(event.current_yaw):
             self._fail("YAW_MISSING_DURING_ACTIVE_SCAN")
             return self._output(event, assessment, ("YAW_MISSING_DURING_ACTIVE_SCAN",))
@@ -438,7 +509,10 @@ class ActiveRelocalizationController:
                 return self._output(event, assessment, ("SETTLING",))
             self.settle_until = None
             self.waiting_since = event.now
+            self.candidate_requested_for_segment = False
             self.state = WAITING_CANDIDATE
+            if event.scan_updated:
+                return self._request_candidate(event, assessment)
             return self._output(event, assessment, ("SETTLE_COMPLETE",))
         if self.segment_started is None or self.segment_target_yaw is None:
             self._fail("SEGMENT_NOT_INITIALIZED")
@@ -467,39 +541,27 @@ class ActiveRelocalizationController:
         if event.health.scan_fresh is False:
             self._fail("SCAN_STALE_WHILE_WAITING")
             return self._output(event, assessment, ("SCAN_STALE_WHILE_WAITING",))
-        if self.candidate is not None and self._candidate_is_good(self.candidate):
-            self.state = VERIFYING
-            self.verification_count = 0
-            self.last_verify_pose = None
-            return self._output(event, assessment, ("CANDIDATE_RECEIVED",))
+        if self.candidate is not None:
+            if self.candidate.accepted and self._candidate_is_good(self.candidate):
+                self.state = VERIFYING
+                self.verification_count = 0
+                self.last_verify_pose = None
+                return self._output(event, assessment, ("CANDIDATE_RECEIVED",))
+            return self._candidate_failed(event, assessment, self.candidate.reason or "CANDIDATE_QUALITY_LOW")
         if self.waiting_since is not None and event.now - self.waiting_since > self.config.segment_timeout:
             self._fail("WAITING_FOR_CANDIDATE_TIMEOUT")
             return self._output(event, assessment, ("WAITING_FOR_CANDIDATE_TIMEOUT",))
-        if event.scan_updated:
-            self.candidate = None
-            if self.segment_index + 1 < len(self.config.segment_deltas):
-                self.segment_index += 1
-                if self.total_rotation + abs(self.config.segment_deltas[self.segment_index]) > self.config.max_total_rotation:
-                    self._fail("MAX_TOTAL_ROTATION")
-                    return self._output(event, assessment, ("MAX_TOTAL_ROTATION",))
-                self.segment_started = event.now
-                self.segment_start_yaw = float(event.current_yaw) if _finite(event.current_yaw) else None
-                if self.segment_start_yaw is None:
-                    self._fail("YAW_MISSING_FOR_NEXT_SEGMENT")
-                    return self._output(event, assessment, ("YAW_MISSING_FOR_NEXT_SEGMENT",))
-                self.segment_target_yaw = self.segment_start_yaw + self.config.segment_deltas[self.segment_index]
-                self.state = ACTIVE_SCAN
-                return self._output(event, assessment, ("NEXT_SEGMENT",))
-            self._fail("NO_ACCEPTABLE_CANDIDATE")
-            return self._output(event, assessment, ("NO_ACCEPTABLE_CANDIDATE",))
+        if event.scan_updated and not self.candidate_requested_for_segment:
+            return self._request_candidate(event, assessment)
         return self._output(event, assessment, ("WAITING_FOR_CANDIDATE",))
 
     def _handle_verifying(self, event: SupervisorInput, assessment: _HealthAssessment) -> SupervisorOutput:
         if self._attempt_timed_out(event.now):
             self._fail("VERIFY_ATTEMPT_TIMEOUT")
             return self._output(event, assessment, ("VERIFY_ATTEMPT_TIMEOUT",))
-        if self.candidate is None or not self._candidate_is_good(self.candidate):
-            return self._verification_failed(event, assessment, "CANDIDATE_QUALITY_LOW")
+        if self.candidate is None or not self.candidate.accepted or not self._candidate_is_good(self.candidate):
+            reason = "CANDIDATE_QUALITY_LOW" if self.candidate is None else self.candidate.reason or "CANDIDATE_QUALITY_LOW"
+            return self._verification_failed(event, assessment, reason)
         if event.health is None or event.health.odom_fresh is not True or event.health.scan_fresh is False or event.health.amcl_fresh is False:
             return self._verification_failed(event, assessment, "VERIFICATION_SIGNAL_STALE")
         pose = event.health
@@ -530,6 +592,7 @@ class ActiveRelocalizationController:
                 self.segment_started = event.now
                 self.segment_start_yaw = float(event.current_yaw)
                 self.segment_target_yaw = self.segment_start_yaw + self.config.segment_deltas[self.segment_index]
+                self.candidate_requested_for_segment = False
                 self.state = ACTIVE_SCAN
                 return self._output(event, assessment, (reason, "RETURN_TO_ACTIVE_SCAN"))
         self._fail(reason)
@@ -542,6 +605,43 @@ class ActiveRelocalizationController:
             and candidate.inlier_ratio >= self.config.min_scan_match_inlier_ratio
             and candidate.mean_distance <= self.config.max_scan_match_mean_distance
         )
+
+    def _candidate_is_fresh(self, candidate: CandidateQuality) -> bool:
+        if self.candidate_request_time is None:
+            return False
+        received_time = candidate.received_time if candidate.received_time is not None else candidate.timestamp
+        return _finite(received_time) and float(received_time) >= self.candidate_request_time
+
+    @staticmethod
+    def _pose_from_health(health: LocalizationHealth) -> tuple[float, float, float] | None:
+        if not all(_finite(value) for value in (health.pose_x, health.pose_y, health.pose_yaw)):
+            return None
+        return float(health.pose_x), float(health.pose_y), float(health.pose_yaw)
+
+    def _request_candidate(self, event: SupervisorInput, assessment: _HealthAssessment) -> SupervisorOutput:
+        self.candidate_request_time = event.now
+        self.candidate_requested_for_segment = True
+        self.candidate = None
+        return self._output(event, assessment, ("REQUEST_CANDIDATE",), request_candidate=True)
+
+    def _candidate_failed(self, event: SupervisorInput, assessment: _HealthAssessment, reason: str) -> SupervisorOutput:
+        self.failure_reason = reason
+        self.candidate = None
+        if self.segment_index + 1 < len(self.config.segment_deltas) and _finite(event.current_yaw):
+            next_segment = self.segment_index + 1
+            if self.total_rotation + abs(self.config.segment_deltas[next_segment]) > self.config.max_total_rotation:
+                self._fail("MAX_TOTAL_ROTATION")
+                return self._output(event, assessment, ("MAX_TOTAL_ROTATION",))
+            self.segment_index = next_segment
+            self.segment_started = event.now
+            self.segment_start_yaw = float(event.current_yaw)
+            self.segment_target_yaw = self.segment_start_yaw + self.config.segment_deltas[self.segment_index]
+            self.candidate_request_time = None
+            self.candidate_requested_for_segment = False
+            self.state = ACTIVE_SCAN
+            return self._output(event, assessment, (reason, "RETURN_TO_ACTIVE_SCAN"))
+        self._fail(reason)
+        return self._output(event, assessment, (reason,))
 
     def _attempt_timed_out(self, now: float) -> bool:
         return self.attempt_started is not None and now - self.attempt_started > self.config.max_attempt_duration
@@ -560,6 +660,7 @@ class ActiveRelocalizationController:
         assessment: _HealthAssessment | None,
         reasons: tuple[str, ...],
         angular: float = 0.0,
+        request_candidate: bool = False,
     ) -> SupervisorOutput:
         elapsed = 0.0 if self.attempt_started is None else max(0.0, event.now - self.attempt_started)
         candidate = self.candidate
@@ -586,4 +687,8 @@ class ActiveRelocalizationController:
             failure_reason=self.failure_reason,
             manual_takeover=self._manual_latched,
             health_reasons=tuple(dict.fromkeys((*assessment.reasons, *reasons))),
+            request_candidate=request_candidate,
+            candidate_request_time=self.candidate_request_time,
+            seed_source=self.seed_source,
+            seed_pose=self.seed_pose,
         )

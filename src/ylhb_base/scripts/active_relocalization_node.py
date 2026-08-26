@@ -62,6 +62,13 @@ def _int_value(values: dict[str, str], key: str) -> int:
         return 0
 
 
+def _bool_value(values: dict[str, str], key: str, default: bool = False) -> bool:
+    raw = _value(values, key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "accepted", "ok"}
+
+
 def _quaternion_yaw(orientation: Any) -> float | None:
     try:
         x = float(orientation.x)
@@ -120,6 +127,9 @@ def create_node(node_name: str) -> Any:
             self._manual_takeover = False
 
             self._cmd_pub = self.create_publisher(Twist, str(self.get_parameter("cmd_vel_topic").value), 10)
+            self._seed_pub = self.create_publisher(
+                PoseWithCovarianceStamped, str(self.get_parameter("seed_topic").value), 10
+            )
             self._status_pub = self.create_publisher(
                 DiagnosticArray, str(self.get_parameter("status_topic").value), 10
             )
@@ -173,6 +183,8 @@ def create_node(node_name: str) -> Any:
                 "lidar_quality_topic": "/dg/lidar/quality",
                 "gnss_quality_topic": "/dg/gnss/quality",
                 "match_quality_topic": "/dg/relocalization/match_quality",
+                "seed_topic": "/dg/relocalization/seed",
+                "seed_frame_id": "map",
                 "manual_topic": "/dg/relocalization/manual_takeover",
                 "cmd_vel_topic": "/cmd_vel",
                 "status_topic": "/dg/relocalization/status",
@@ -291,6 +303,11 @@ def create_node(node_name: str) -> Any:
             selected = self._select_status(message, "MATCH")
             if selected is None:
                 return
+            received_time = self._now()
+            self._match_quality_received_at = received_time
+            self._scan_match_score = None
+            self._scan_match_inlier_ratio = None
+            self._scan_match_mean_distance = None
             values = {str(item.key): str(item.value) for item in selected.values}
             score = _float_value(values, "score")
             inlier = _float_value(values, "inlier_ratio")
@@ -303,7 +320,6 @@ def create_node(node_name: str) -> Any:
             self._scan_match_score = score
             self._scan_match_inlier_ratio = inlier
             self._scan_match_mean_distance = mean_distance
-            self._match_quality_received_at = self._now()
             timestamp = _float_value(values, "timestamp")
             self._candidate = CandidateQuality(
                 timestamp=self._now() if timestamp is None else timestamp,
@@ -314,8 +330,11 @@ def create_node(node_name: str) -> Any:
                 y=float(y),
                 yaw=float(yaw),
                 used_points=_int_value(values, "used_points"),
+                accepted=_bool_value(values, "accepted", default=True),
+                reason=_value(values, "reason") or str(selected.message),
+                received_time=received_time,
             )
-            self._candidate_received_at = self._now()
+            self._candidate_received_at = received_time
             self._candidate_sequence += 1
 
         @staticmethod
@@ -347,6 +366,9 @@ def create_node(node_name: str) -> Any:
                 scan_fresh=self._fresh(self._scan_received_at, now),
                 odom_fresh=self._fresh(self._odom_received_at, now),
                 amcl_fresh=self._fresh(self._amcl_received_at, now),
+                lidar_fresh=self._fresh(self._lidar_health_received_at, now),
+                gnss_fresh=self._fresh(self._gnss_health_received_at, now),
+                scan_match_fresh=self._fresh(self._match_quality_received_at, now),
                 odom_linear_velocity=self._odom_linear,
                 odom_angular_velocity=self._odom_angular,
                 pose_x=None if pose is None else pose[0],
@@ -373,6 +395,8 @@ def create_node(node_name: str) -> Any:
             )
             output = self._controller.process(event)
             self._publish_command(output.command_linear_x, output.command_angular_z)
+            if output.request_candidate:
+                self._publish_seed(output.seed_pose)
             self._publish_status(output, now)
             self._last_tick = now
 
@@ -384,6 +408,23 @@ def create_node(node_name: str) -> Any:
             message.linear.x = float(linear)
             message.angular.z = float(angular)
             self._cmd_pub.publish(message)
+
+        def _publish_seed(self, pose: tuple[float, float, float] | None) -> None:
+            if pose is None:
+                self.get_logger().error("candidate requested but no valid seed pose is available")
+                return
+            message = PoseWithCovarianceStamped()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.frame_id = str(self.get_parameter("seed_frame_id").value)
+            message.pose.pose.position.x = pose[0]
+            message.pose.pose.position.y = pose[1]
+            message.pose.pose.position.z = 0.0
+            message.pose.pose.orientation.z = math.sin(pose[2] * 0.5)
+            message.pose.pose.orientation.w = math.cos(pose[2] * 0.5)
+            message.pose.covariance[0] = 0.5
+            message.pose.covariance[7] = 0.5
+            message.pose.covariance[35] = math.radians(20.0) ** 2
+            self._seed_pub.publish(message)
 
         def _publish_status(self, output: Any, now: float) -> None:
             array = DiagnosticArray()
@@ -412,6 +453,10 @@ def create_node(node_name: str) -> Any:
                 "amcl_health": output.amcl_health,
                 "failure_reason": output.failure_reason,
                 "manual_takeover": output.manual_takeover,
+                "request_candidate": output.request_candidate,
+                "candidate_request_time": output.candidate_request_time,
+                "seed_source": output.seed_source,
+                "seed_pose": output.seed_pose,
                 "command_angular_z": output.command_angular_z,
                 "health_reasons": ";".join(output.health_reasons),
                 "timestamp": now,

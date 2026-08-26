@@ -88,6 +88,14 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
         self.assertEqual(output.state, ACTIVE_SCAN)
         self.assertEqual(output.command_angular_z, 0.0)
 
+    def request_candidate(self, controller: ActiveRelocalizationController) -> None:
+        self.enter_active(controller)
+        controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.1))
+        controller.process(SupervisorInput(0.7, healthy(), current_yaw=0.1))
+        output = controller.process(SupervisorInput(0.8, healthy(), current_yaw=0.1, scan_updated=True))
+        self.assertEqual(output.state, WAITING_CANDIDATE)
+        self.assertTrue(output.request_candidate)
+
     def test_health_is_good_with_all_optional_inputs(self) -> None:
         assessment = assess_health(healthy(), config())
         self.assertFalse(assessment.triggerable)
@@ -115,6 +123,29 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
         assessment = assess_health(healthy(lidar_quality=0.1), config())
         self.assertFalse(assessment.triggerable)
         self.assertTrue(assessment.degraded)
+
+    def test_old_good_lidar_is_marked_stale_and_does_not_trigger_alone(self) -> None:
+        assessment = assess_health(healthy(lidar_fresh=False), config())
+        self.assertEqual(assessment.lidar_health, "STALE")
+        self.assertFalse(assessment.triggerable)
+        self.assertIn("LIDAR_STALE", assessment.reasons)
+
+    def test_old_good_gnss_is_marked_stale_and_does_not_trigger_alone(self) -> None:
+        assessment = assess_health(healthy(gnss_quality="GOOD", gnss_fresh=False), config())
+        self.assertEqual(assessment.gnss_health, "STALE")
+        self.assertFalse(assessment.triggerable)
+        self.assertIn("GNSS_STALE", assessment.reasons)
+
+    def test_old_good_scan_match_is_marked_stale_and_does_not_trigger_alone(self) -> None:
+        assessment = assess_health(healthy(scan_match_fresh=False), config())
+        self.assertFalse(assessment.triggerable)
+        self.assertTrue(assessment.degraded)
+        self.assertIn("SCAN_MATCH_STALE", assessment.reasons)
+
+    def test_required_stale_signal_can_trigger_by_configuration(self) -> None:
+        required = config(required_signals=("lidar", "gnss", "scan_match"))
+        assessment = assess_health(healthy(lidar_fresh=False, gnss_fresh=False, scan_match_fresh=False), required)
+        self.assertTrue(assessment.triggerable)
 
     def test_scan_match_or_amcl_bad_health_is_triggerable(self) -> None:
         self.assertTrue(assess_health(healthy(scan_match_score=0.1), config()).triggerable)
@@ -185,6 +216,18 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
         controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.1))
         controller.process(SupervisorInput(0.7, healthy(), current_yaw=0.1))
         output = controller.process(SupervisorInput(0.8, healthy(), current_yaw=0.1, scan_updated=True))
+        self.assertEqual(output.state, WAITING_CANDIDATE)
+        self.assertTrue(output.request_candidate)
+        repeated = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.1, scan_updated=True))
+        self.assertEqual(repeated.state, WAITING_CANDIDATE)
+        self.assertFalse(repeated.request_candidate)
+
+    def test_rejected_match_advances_to_next_segment(self) -> None:
+        controller = ActiveRelocalizationController(config())
+        self.request_candidate(controller)
+        output = controller.process(
+            SupervisorInput(0.9, healthy(), current_yaw=0.1, candidate=candidate(accepted=False, reason="SCORE_LOW", received_time=0.9))
+        )
         self.assertEqual(output.state, ACTIVE_SCAN)
         self.assertEqual(output.active_segment, 2)
 
@@ -229,30 +272,28 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
 
     def test_total_rotation_limit_blocks_next_segment(self) -> None:
         controller = ActiveRelocalizationController(config(max_total_rotation=0.1))
-        self.enter_active(controller)
-        controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.1))
-        controller.process(SupervisorInput(0.7, healthy(), current_yaw=0.1))
-        output = controller.process(SupervisorInput(0.8, healthy(), current_yaw=0.1, scan_updated=True))
+        self.request_candidate(controller)
+        output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.1, candidate=candidate(accepted=False, reason="MAX_TOTAL_ROTATION", received_time=0.9)))
         self.assertEqual(output.state, FAILED)
         self.assertEqual(output.failure_reason, "MAX_TOTAL_ROTATION")
 
     def test_good_candidate_enters_verification(self) -> None:
         controller = ActiveRelocalizationController(config())
-        self.enter_active(controller)
-        output = controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate()))
+        self.request_candidate(controller)
+        output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(received_time=0.9)))
         self.assertEqual(output.state, VERIFYING)
         self.assertEqual(output.command_angular_z, 0.0)
 
     def test_low_candidate_is_not_accepted(self) -> None:
         controller = ActiveRelocalizationController(config())
-        self.enter_active(controller)
-        output = controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate(score=0.1)))
+        self.request_candidate(controller)
+        output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(score=0.1, received_time=0.9)))
         self.assertEqual(output.state, ACTIVE_SCAN)
 
     def test_verification_requires_consecutive_samples_and_recovers(self) -> None:
         controller = ActiveRelocalizationController(config(verification_samples=2))
-        self.enter_active(controller)
-        controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate()))
+        self.request_candidate(controller)
+        controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(received_time=0.9)))
         pending = controller.process(SupervisorInput(0.6, healthy(), current_yaw=0.0))
         self.assertEqual(pending.state, VERIFYING)
         recovered = controller.process(SupervisorInput(0.7, healthy(), current_yaw=0.0))
@@ -261,18 +302,18 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
 
     def test_verification_pose_jump_fails(self) -> None:
         controller = ActiveRelocalizationController(config(segment_deltas=(0.1,), verification_samples=2))
-        self.enter_active(controller)
-        controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate()))
-        controller.process(SupervisorInput(0.6, healthy(pose_x=0.0), current_yaw=0.0))
-        output = controller.process(SupervisorInput(0.7, healthy(pose_x=1.0), current_yaw=0.0))
+        self.request_candidate(controller)
+        controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(received_time=0.9)))
+        controller.process(SupervisorInput(1.0, healthy(pose_x=0.0), current_yaw=0.0))
+        output = controller.process(SupervisorInput(1.1, healthy(pose_x=1.0), current_yaw=0.0))
         self.assertEqual(output.state, FAILED)
         self.assertEqual(output.failure_reason, "VERIFY_POSE_JUMP")
 
     def test_verification_quality_failure_returns_to_next_active_segment(self) -> None:
         controller = ActiveRelocalizationController(config())
-        self.enter_active(controller)
-        controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate()))
-        output = controller.process(SupervisorInput(0.6, healthy(), current_yaw=0.0, candidate=candidate(score=0.1)))
+        self.request_candidate(controller)
+        controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(received_time=0.9)))
+        output = controller.process(SupervisorInput(1.0, healthy(), current_yaw=0.0, candidate=candidate(score=0.1, received_time=1.0)))
         self.assertEqual(output.state, ACTIVE_SCAN)
         self.assertEqual(output.failure_reason, "CANDIDATE_QUALITY_LOW")
 
@@ -305,9 +346,35 @@ class ActiveRelocalizationCoreTests(unittest.TestCase):
         assessment = assess_health(healthy(amcl_covariance=0.5, scan_match_score=0.45, scan_match_inlier_ratio=0.45, scan_match_mean_distance=0.3), cfg)
         self.assertFalse(assessment.triggerable)
         controller = ActiveRelocalizationController(cfg)
-        self.enter_active(controller)
-        output = controller.process(SupervisorInput(0.5, healthy(), current_yaw=0.0, candidate=candidate(score=0.45, inlier_ratio=0.45, mean_distance=0.3)))
+        self.request_candidate(controller)
+        output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(score=0.45, inlier_ratio=0.45, mean_distance=0.3, received_time=0.9)))
         self.assertEqual(output.state, VERIFYING)
+
+    def test_stale_candidate_before_request_is_ignored(self) -> None:
+        controller = ActiveRelocalizationController(config())
+        self.request_candidate(controller)
+        output = controller.process(SupervisorInput(0.9, healthy(), current_yaw=0.0, candidate=candidate(received_time=0.7)))
+        self.assertEqual(output.state, WAITING_CANDIDATE)
+
+    def test_normal_health_saves_last_trusted_pose_and_attempt_prefers_it(self) -> None:
+        controller = ActiveRelocalizationController(config())
+        controller.process(SupervisorInput(0.0, healthy(pose_x=2.0, pose_y=3.0, pose_yaw=0.4)))
+        self.trigger_to_stopping(controller)
+        output = controller.process(SupervisorInput(0.4, healthy(pose_x=9.0, pose_y=9.0), current_yaw=0.0))
+        self.assertEqual(output.seed_source, "LAST_TRUSTED")
+        self.assertEqual(output.seed_pose, (2.0, 3.0, 0.4))
+
+    def test_current_amcl_is_fallback_seed_when_no_trusted_pose_exists(self) -> None:
+        controller = ActiveRelocalizationController(config())
+        self.trigger_to_stopping(controller)
+        output = controller.process(SupervisorInput(0.4, healthy(pose_x=2.0, pose_y=3.0, pose_yaw=0.4), current_yaw=0.0))
+        self.assertEqual(output.seed_source, "CURRENT_AMCL")
+
+    def test_manual_and_shutdown_never_request_candidate(self) -> None:
+        manual = ActiveRelocalizationController(config()).process(SupervisorInput(0.0, healthy(), manual_takeover=True))
+        shutdown = ActiveRelocalizationController(config()).process(SupervisorInput(0.0, healthy(), shutdown=True))
+        self.assertFalse(manual.request_candidate)
+        self.assertFalse(shutdown.request_candidate)
 
     def test_controller_sequence_is_deterministic(self) -> None:
         events = [
