@@ -236,6 +236,7 @@ def occupancy_grid_to_distance_field(map_msg, occupied_threshold=50):
 
 def main(args=None):
     import rclpy
+    from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
     from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
     from rclpy.duration import Duration
     from rclpy.node import Node
@@ -271,6 +272,9 @@ def main(args=None):
             )
             self._scan_match_pub = self.create_publisher(
                 PoseStamped, "/scan_match_pose", 10
+            )
+            self._match_quality_pub = self.create_publisher(
+                DiagnosticArray, "/dg/relocalization/match_quality", 10
             )
 
             self.create_subscription(OccupancyGrid, "/map", self._on_map, 1)
@@ -460,6 +464,7 @@ def main(args=None):
             self._last_published_time = self.get_clock().now()
             self._scan_match_pub.publish(pose_msg)
             self._initialpose_pub.publish(corrected)
+            self._publish_match_quality(result)
             self.get_logger().info(
                 "scan-map relocalization succeeded: "
                 f"x={result.pose[0]:.3f}, y={result.pose[1]:.3f}, "
@@ -468,6 +473,29 @@ def main(args=None):
                 f"mean_distance={result.score.mean_distance:.3f}, "
                 f"inliers={result.score.inlier_ratio:.2f}"
             )
+
+        def _publish_match_quality(self, result):
+            array = DiagnosticArray()
+            array.header.stamp = self.get_clock().now().to_msg()
+            status = DiagnosticStatus()
+            status.name = "DG Scan-to-Map Match Quality"
+            status.level = DiagnosticStatus.OK
+            status.message = "local relocalization candidate"
+            status.values = [
+                KeyValue(key="score", value=str(result.score.score)),
+                KeyValue(key="mean_distance", value=str(result.score.mean_distance)),
+                KeyValue(key="inlier_ratio", value=str(result.score.inlier_ratio)),
+                KeyValue(key="used_points", value=str(result.score.used_points)),
+                KeyValue(key="candidate_x", value=str(result.pose[0])),
+                KeyValue(key="candidate_y", value=str(result.pose[1])),
+                KeyValue(key="candidate_yaw", value=str(result.pose[2])),
+                KeyValue(
+                    key="timestamp",
+                    value=str(self.get_clock().now().nanoseconds / 1e9),
+                ),
+            ]
+            array.status.append(status)
+            self._match_quality_pub.publish(array)
 
     rclpy.init(args=args)
     node = ScanMapRelocalizationNode()

@@ -108,6 +108,8 @@ install(PROGRAMS
   scripts/lidar_robust_node.py
   scripts/gnss_quality_gate.py
   scripts/gnss_quality_node.py
+  scripts/active_relocalization_core.py
+  scripts/active_relocalization_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -167,6 +169,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_scan_map_relocalization test/test_scan_map_relocalization.py)
   ament_add_pytest_test(test_lidar_robust_features test/test_lidar_robust_features.py)
   ament_add_pytest_test(test_gnss_quality_gate test/test_gnss_quality_gate.py)
+  ament_add_pytest_test(test_active_relocalization_core test/test_active_relocalization_core.py)
 endif()
 
 ament_package()

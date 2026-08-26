@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""ROS2 supervisor for the local active-relocalization POC.
+
+The node is deliberately not included in the default bringup.  It observes
+the existing AMCL, LiDAR/GNSS quality and Scan-to-Map side channels, and only
+publishes a bounded rotation command after the state machine has confirmed a
+safe stop.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from active_relocalization_core import (  # noqa: E402
+    ActiveRelocalizationConfig,
+    ActiveRelocalizationController,
+    CandidateQuality,
+    LocalizationHealth,
+    SupervisorInput,
+)
+
+
+def _stamp_to_seconds(stamp: Any) -> float | None:
+    try:
+        value = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _value(values: dict[str, str], key: str) -> str | None:
+    result = values.get(key)
+    return None if result is None or result == "" else result
+
+
+def _float_value(values: dict[str, str], key: str) -> float | None:
+    raw = _value(values, key)
+    if raw is None:
+        return None
+    try:
+        result = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _int_value(values: dict[str, str], key: str) -> int:
+    raw = _value(values, key)
+    if raw is None:
+        return 0
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _quaternion_yaw(orientation: Any) -> float | None:
+    try:
+        x = float(orientation.x)
+        y = float(orientation.y)
+        z = float(orientation.z)
+        w = float(orientation.w)
+        result = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the DG-202611 active relocalization supervisor.")
+    parser.add_argument("--node-name", default="active_relocalization_node", help="ROS node name")
+    return parser
+
+
+def create_node(node_name: str) -> Any:
+    from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+    from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+    from nav_msgs.msg import Odometry
+    from rclpy.node import Node
+    from sensor_msgs.msg import LaserScan
+    from std_msgs.msg import Bool
+
+    class ActiveRelocalizationNode(Node):
+        def __init__(self) -> None:
+            super().__init__(node_name)
+            self._declare_parameters()
+            self._config = self._read_config()
+            self._controller = ActiveRelocalizationController(self._config)
+            self._last_tick = self._now()
+            self._scan_received_at: float | None = None
+            self._scan_sequence = 0
+            self._consumed_scan_sequence = 0
+            self._odom_received_at: float | None = None
+            self._odom_yaw: float | None = None
+            self._odom_linear = 0.0
+            self._odom_angular = 0.0
+            self._amcl_received_at: float | None = None
+            self._amcl_covariance: float | None = None
+            self._amcl_pose: tuple[float, float, float] | None = None
+            self._lidar_quality: float | None = None
+            self._lidar_health_received_at: float | None = None
+            self._gnss_quality: str | None = None
+            self._gnss_health_received_at: float | None = None
+            self._candidate: CandidateQuality | None = None
+            self._candidate_received_at: float | None = None
+            self._candidate_sequence = 0
+            self._consumed_candidate_sequence = 0
+            self._scan_match_score: float | None = None
+            self._scan_match_inlier_ratio: float | None = None
+            self._scan_match_mean_distance: float | None = None
+            self._match_quality_received_at: float | None = None
+            self._manual_takeover = False
+
+            self._cmd_pub = self.create_publisher(Twist, str(self.get_parameter("cmd_vel_topic").value), 10)
+            self._status_pub = self.create_publisher(
+                DiagnosticArray, str(self.get_parameter("status_topic").value), 10
+            )
+            self.create_subscription(
+                LaserScan, str(self.get_parameter("scan_topic").value), self._on_scan, 10
+            )
+            self.create_subscription(
+                Odometry, str(self.get_parameter("odom_topic").value), self._on_odom, 10
+            )
+            self.create_subscription(
+                PoseWithCovarianceStamped,
+                str(self.get_parameter("amcl_pose_topic").value),
+                self._on_amcl_pose,
+                10,
+            )
+            self.create_subscription(
+                DiagnosticArray,
+                str(self.get_parameter("lidar_quality_topic").value),
+                self._on_lidar_quality,
+                10,
+            )
+            self.create_subscription(
+                DiagnosticArray,
+                str(self.get_parameter("gnss_quality_topic").value),
+                self._on_gnss_quality,
+                10,
+            )
+            self.create_subscription(
+                DiagnosticArray,
+                str(self.get_parameter("match_quality_topic").value),
+                self._on_match_quality,
+                10,
+            )
+            self.create_subscription(
+                Bool,
+                str(self.get_parameter("manual_topic").value),
+                self._on_manual_takeover,
+                10,
+            )
+            timer_period = float(self.get_parameter("timer_period").value)
+            self._timer = self.create_timer(timer_period, self._tick)
+            self.get_logger().warn(
+                "active relocalization POC is a manual side-channel node; default bringup is unchanged"
+            )
+
+        def _declare_parameters(self) -> None:
+            defaults = {
+                "scan_topic": "/scan",
+                "odom_topic": "/odom",
+                "amcl_pose_topic": "/amcl_pose",
+                "lidar_quality_topic": "/dg/lidar/quality",
+                "gnss_quality_topic": "/dg/gnss/quality",
+                "match_quality_topic": "/dg/relocalization/match_quality",
+                "manual_topic": "/dg/relocalization/manual_takeover",
+                "cmd_vel_topic": "/cmd_vel",
+                "status_topic": "/dg/relocalization/status",
+                "timer_period": 0.1,
+                "suspect_samples": 2,
+                "trigger_samples": 2,
+                "healthy_recovery_samples": 3,
+                "suspect_duration": 0.0,
+                "trigger_duration": 0.0,
+                "healthy_recovery_duration": 0.0,
+                "max_covariance": 0.5,
+                "min_lidar_quality": 0.2,
+                "min_scan_match_score": 0.45,
+                "min_scan_match_inlier_ratio": 0.45,
+                "max_scan_match_mean_distance": 0.30,
+                "signal_timeout": 1.0,
+                "stop_velocity": 0.03,
+                "angular_speed": 0.18,
+                "yaw_tolerance": math.radians(1.5),
+                "segment_timeout": 8.0,
+                "settle_time": 0.5,
+                "segment_deltas_deg": [10.0, -20.0, 10.0],
+                "max_total_rotation": math.radians(60.0),
+                "max_attempt_duration": 30.0,
+                "max_attempts": 2,
+                "verification_samples": 3,
+                "max_verify_position_jump": 0.5,
+                "max_verify_yaw_jump": math.radians(20.0),
+            }
+            for name, value in defaults.items():
+                self.declare_parameter(name, value)
+
+        def _read_config(self) -> ActiveRelocalizationConfig:
+            parameter = self.get_parameter
+            deltas = tuple(math.radians(float(value)) for value in parameter("segment_deltas_deg").value)
+            fields = {
+                "suspect_samples": int(parameter("suspect_samples").value),
+                "trigger_samples": int(parameter("trigger_samples").value),
+                "healthy_recovery_samples": int(parameter("healthy_recovery_samples").value),
+                "suspect_duration": float(parameter("suspect_duration").value),
+                "trigger_duration": float(parameter("trigger_duration").value),
+                "healthy_recovery_duration": float(parameter("healthy_recovery_duration").value),
+                "max_covariance": float(parameter("max_covariance").value),
+                "min_lidar_quality": float(parameter("min_lidar_quality").value),
+                "min_scan_match_score": float(parameter("min_scan_match_score").value),
+                "min_scan_match_inlier_ratio": float(parameter("min_scan_match_inlier_ratio").value),
+                "max_scan_match_mean_distance": float(parameter("max_scan_match_mean_distance").value),
+                "signal_timeout": float(parameter("signal_timeout").value),
+                "stop_velocity": float(parameter("stop_velocity").value),
+                "angular_speed": float(parameter("angular_speed").value),
+                "yaw_tolerance": float(parameter("yaw_tolerance").value),
+                "segment_timeout": float(parameter("segment_timeout").value),
+                "settle_time": float(parameter("settle_time").value),
+                "segment_deltas": deltas,
+                "max_total_rotation": float(parameter("max_total_rotation").value),
+                "max_attempt_duration": float(parameter("max_attempt_duration").value),
+                "max_attempts": int(parameter("max_attempts").value),
+                "verification_samples": int(parameter("verification_samples").value),
+                "max_verify_position_jump": float(parameter("max_verify_position_jump").value),
+                "max_verify_yaw_jump": float(parameter("max_verify_yaw_jump").value),
+            }
+            return ActiveRelocalizationConfig(**fields)
+
+        def _now(self) -> float:
+            return self.get_clock().now().nanoseconds / 1e9
+
+        def _fresh(self, received_at: float | None, now: float) -> bool | None:
+            if received_at is None:
+                return None
+            return now - received_at <= self._config.signal_timeout
+
+        def _on_scan(self, _message: Any) -> None:
+            self._scan_received_at = self._now()
+            self._scan_sequence += 1
+
+        def _on_odom(self, message: Any) -> None:
+            self._odom_received_at = self._now()
+            self._odom_yaw = _quaternion_yaw(message.pose.pose.orientation)
+            try:
+                self._odom_linear = float(message.twist.twist.linear.x)
+                self._odom_angular = float(message.twist.twist.angular.z)
+            except (AttributeError, TypeError, ValueError):
+                self._odom_linear = float("nan")
+                self._odom_angular = float("nan")
+
+        def _on_amcl_pose(self, message: Any) -> None:
+            self._amcl_received_at = self._now()
+            try:
+                self._amcl_covariance = float(message.pose.covariance[0])
+                pose = message.pose.pose
+                yaw = _quaternion_yaw(pose.orientation)
+                self._amcl_pose = (float(pose.position.x), float(pose.position.y), yaw) if yaw is not None else None
+            except (AttributeError, IndexError, TypeError, ValueError):
+                self._amcl_covariance = None
+                self._amcl_pose = None
+
+        def _on_lidar_quality(self, message: Any) -> None:
+            selected = self._select_status(message, "LIDAR")
+            if selected is None:
+                return
+            values = {str(item.key): str(item.value) for item in selected.values}
+            self._lidar_quality = _float_value(values, "geometry_score")
+            if self._lidar_quality is None:
+                self._lidar_quality = _float_value(values, "valid_ratio")
+            self._lidar_health_received_at = self._now()
+
+        def _on_gnss_quality(self, message: Any) -> None:
+            selected = self._select_status(message, "GNSS")
+            if selected is None:
+                return
+            values = {str(item.key): str(item.value) for item in selected.values}
+            self._gnss_quality = _value(values, "current_state") or _value(values, "decision") or "UNKNOWN"
+            self._gnss_health_received_at = self._now()
+
+        def _on_match_quality(self, message: Any) -> None:
+            selected = self._select_status(message, "MATCH")
+            if selected is None:
+                return
+            values = {str(item.key): str(item.value) for item in selected.values}
+            score = _float_value(values, "score")
+            inlier = _float_value(values, "inlier_ratio")
+            mean_distance = _float_value(values, "mean_distance")
+            x = _float_value(values, "candidate_x")
+            y = _float_value(values, "candidate_y")
+            yaw = _float_value(values, "candidate_yaw")
+            if None in (score, inlier, mean_distance, x, y, yaw):
+                return
+            self._scan_match_score = score
+            self._scan_match_inlier_ratio = inlier
+            self._scan_match_mean_distance = mean_distance
+            self._match_quality_received_at = self._now()
+            timestamp = _float_value(values, "timestamp")
+            self._candidate = CandidateQuality(
+                timestamp=self._now() if timestamp is None else timestamp,
+                score=float(score),
+                inlier_ratio=float(inlier),
+                mean_distance=float(mean_distance),
+                x=float(x),
+                y=float(y),
+                yaw=float(yaw),
+                used_points=_int_value(values, "used_points"),
+            )
+            self._candidate_received_at = self._now()
+            self._candidate_sequence += 1
+
+        @staticmethod
+        def _select_status(message: Any, hint: str) -> Any | None:
+            selected = None
+            for status in message.status:
+                if selected is None:
+                    selected = status
+                if hint in str(status.name).upper():
+                    return status
+            return selected
+
+        def _on_manual_takeover(self, message: Any) -> None:
+            if bool(message.data):
+                self._manual_takeover = True
+                self._publish_zero()
+                self._tick()
+
+        def _health(self, now: float) -> LocalizationHealth:
+            pose = self._amcl_pose
+            return LocalizationHealth(
+                timestamp=now,
+                amcl_covariance=self._amcl_covariance,
+                lidar_quality=self._lidar_quality,
+                gnss_quality=self._gnss_quality,
+                scan_match_score=self._scan_match_score,
+                scan_match_inlier_ratio=self._scan_match_inlier_ratio,
+                scan_match_mean_distance=self._scan_match_mean_distance,
+                scan_fresh=self._fresh(self._scan_received_at, now),
+                odom_fresh=self._fresh(self._odom_received_at, now),
+                amcl_fresh=self._fresh(self._amcl_received_at, now),
+                odom_linear_velocity=self._odom_linear,
+                odom_angular_velocity=self._odom_angular,
+                pose_x=None if pose is None else pose[0],
+                pose_y=None if pose is None else pose[1],
+                pose_yaw=None if pose is None else pose[2],
+            )
+
+        def _tick(self) -> None:
+            now = self._now()
+            scan_updated = self._scan_sequence != self._consumed_scan_sequence
+            if scan_updated:
+                self._consumed_scan_sequence = self._scan_sequence
+            candidate = None
+            if self._candidate_sequence != self._consumed_candidate_sequence:
+                candidate = self._candidate
+                self._consumed_candidate_sequence = self._candidate_sequence
+            event = SupervisorInput(
+                now=now,
+                health=self._health(now),
+                current_yaw=self._odom_yaw,
+                scan_updated=scan_updated,
+                candidate=candidate,
+                manual_takeover=self._manual_takeover,
+            )
+            output = self._controller.process(event)
+            self._publish_command(output.command_linear_x, output.command_angular_z)
+            self._publish_status(output, now)
+            self._last_tick = now
+
+        def _publish_zero(self) -> None:
+            self._publish_command(0.0, 0.0)
+
+        def _publish_command(self, linear: float, angular: float) -> None:
+            message = Twist()
+            message.linear.x = float(linear)
+            message.angular.z = float(angular)
+            self._cmd_pub.publish(message)
+
+        def _publish_status(self, output: Any, now: float) -> None:
+            array = DiagnosticArray()
+            array.header.stamp = self.get_clock().now().to_msg()
+            status = DiagnosticStatus()
+            status.name = "DG Active Relocalization Supervisor"
+            if output.state == "RECOVERED":
+                status.level = DiagnosticStatus.OK
+            elif output.state in {"NORMAL", "SUSPECTED", "ACTIVE_SCAN", "WAITING_CANDIDATE", "VERIFYING", "STOPPING"}:
+                status.level = DiagnosticStatus.WARN
+            else:
+                status.level = DiagnosticStatus.ERROR
+            status.message = output.state
+            fields = {
+                "state": output.state,
+                "attempt_id": output.attempt_id,
+                "trigger_reason": output.trigger_reason,
+                "elapsed": output.elapsed,
+                "active_segment": output.active_segment,
+                "verification_count": output.verification_count,
+                "candidate_score": output.candidate_score,
+                "candidate_inlier_ratio": output.candidate_inlier_ratio,
+                "candidate_mean_distance": output.candidate_mean_distance,
+                "lidar_health": output.lidar_health,
+                "gnss_health": output.gnss_health,
+                "amcl_health": output.amcl_health,
+                "failure_reason": output.failure_reason,
+                "manual_takeover": output.manual_takeover,
+                "command_angular_z": output.command_angular_z,
+                "health_reasons": ";".join(output.health_reasons),
+                "timestamp": now,
+            }
+            status.values = [KeyValue(key=str(key), value="" if value is None else str(value)) for key, value in fields.items()]
+            array.status = [status]
+            self._status_pub.publish(array)
+
+        def destroy_node(self) -> bool:
+            self._publish_zero()
+            return super().destroy_node()
+
+    return ActiveRelocalizationNode()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args, ros_args = parser.parse_known_args(argv)
+    try:
+        import rclpy
+    except ImportError:
+        print("ROS2/rclpy is required only for the wrapper node; the core is ROS-independent.", file=sys.stderr)
+        return 2
+    rclpy.init(args=ros_args)
+    node = create_node(args.node_name)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
