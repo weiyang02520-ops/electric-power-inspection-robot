@@ -1,0 +1,322 @@
+"""Run one or all synthetic scenarios against the existing ROS2 integration.
+
+The runner owns process lifecycle, rosbag recording, safety checks, and final
+artifact writing.  It never publishes a health/fusion/control result itself.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .evaluator_node import create_node as create_evaluator
+from .result_writer import evaluate_scenario, write_result
+from .scenario_schema import Scenario, load_scenario
+from .synthetic_injector_node import create_node as create_injector
+
+
+BASELINE_COMMIT = "c41adca7f9bddb4240a1a4855437518b36d9fe13"
+RUNTIME_INTEGRATION_COMMIT = "096bf66377e0dbaa3ed812782222ea95a2439c7a"
+RECORDED_TOPICS = [
+    "/gps/fix", "/gps/rtk_status", "/scan", "/odom", "/map", "/amcl_pose", "/initialpose",
+    "/dg/gnss/quality", "/dg/gnss/accepted_fix", "/dg/lidar/filtered_scan", "/dg/lidar/stable_features", "/dg/lidar/quality",
+    "/dg/relocalization/seed", "/dg/relocalization/status", "/dg/relocalization/match_quality",
+    "/dg/fusion/odom", "/dg/fusion/pose", "/dg/fusion/status", "/dg/navigation/status",
+    "/cmd_vel_nav", "/cmd_vel_recovery", "/dg/test_cmd_vel", "/tf", "/tf_static",
+]
+
+
+def _default_share_dir() -> Path:
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        return Path(get_package_share_directory("dg_synthetic_validation"))
+    except Exception:
+        return Path(__file__).resolve().parents[1]
+
+
+def _git(repo_root: Path, *args: str) -> str:
+    try:
+        return subprocess.check_output(["git", "-C", str(repo_root), *args], text=True, stderr=subprocess.STDOUT).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def _stop_process(process: subprocess.Popen[str] | None, label: str, log_path: Path) -> int | None:
+    if process is None or process.poll() is not None:
+        return None if process is None else process.returncode
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        process.wait(timeout=8.0)
+    except (ProcessLookupError, TimeoutError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=4.0)
+        except (ProcessLookupError, TimeoutError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if process.returncode not in (0, 130, -signal.SIGINT, -signal.SIGTERM):
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{label} exited with code {process.returncode}\n")
+    return process.returncode
+
+
+def _topic_publisher_count(topic: str) -> int:
+    try:
+        completed = subprocess.run(
+            ["ros2", "topic", "info", topic],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    for line in completed.stdout.splitlines():
+        if "Publisher count:" in line:
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return 0
+    return 0
+
+
+def _write_metadata(run_dir: Path, scenario: Scenario, repo_root: Path, integration_command: list[str]) -> None:
+    metadata = {
+        "scenario_id": scenario.scenario_id,
+        "scenario_name": scenario.name,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "baseline_commit": BASELINE_COMMIT,
+        "runtime_integration_commit": RUNTIME_INTEGRATION_COMMIT,
+        "build_commit": _git(repo_root, "rev-parse", "HEAD"),
+        "branch": _git(repo_root, "branch", "--show-current"),
+        "git_status": _git(repo_root, "status", "--short"),
+        "integration_command": integration_command,
+        "recorded_topics": RECORDED_TOPICS,
+        "truth_labels": {
+            "authenticity_marker": "THIS_IS_SYNTHETIC_SOFTWARE_VALIDATION",
+            "validation_class": "SYNTHETIC_SOFTWARE_VALIDATION",
+            "data_class": "NOT_REAL_ROBOT_DATA",
+            "simulator_class": "NOT_GAZEBO_DATA",
+            "performance_claim": "NOT_COMPETITION_PERFORMANCE_EVIDENCE",
+            "performance_claim_label": "NOT_COMPETITION_PERFORMANCE_EVIDENCE",
+        },
+        "hardware": {"real_robot_connected": False, "gazebo_started": False},
+    }
+    with (run_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, ensure_ascii=False)
+
+
+def run_one(
+    scenario: Scenario,
+    scenario_file: Path,
+    results_root: Path,
+    repo_root: Path,
+    settle_sec: float = 2.0,
+) -> tuple[Path, dict[str, Any]]:
+    """Run a single scenario and return its artifact directory and result."""
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = results_root / f"{scenario.scenario_id}_{scenario.name.lower().replace(' ', '_')}_{run_stamp}"
+    logs_dir = run_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    scenario_copy = run_dir / "scenario.yaml"
+    scenario_copy.write_text(scenario_file.read_text(encoding="utf-8"), encoding="utf-8")
+    integration_command = [
+        "ros2", "launch", "ylhb_base", "dg_navigation_integration.launch.py",
+        "enable_nav2:=false", "enable_multisource_fusion:=true",
+        "cmd_vel_output_topic:=/dg/test_cmd_vel",
+    ]
+    _write_metadata(run_dir, scenario, repo_root, integration_command)
+    integration_log = (logs_dir / "integration.log").open("w", encoding="utf-8")
+    bag_log = (logs_dir / "rosbag.log").open("w", encoding="utf-8")
+    integration: subprocess.Popen[str] | None = None
+    bag: subprocess.Popen[str] | None = None
+    evaluator = None
+    injector = None
+    executor = None
+    integration_alive = False
+    try:
+        integration = subprocess.Popen(
+            integration_command,
+            stdout=integration_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
+        )
+        time.sleep(2.5)
+        if integration.poll() is not None:
+            integration_alive = False
+        else:
+            integration_alive = True
+        bag_command = ["ros2", "bag", "record", "-o", str(run_dir / "rosbag"), *RECORDED_TOPICS]
+        bag = subprocess.Popen(
+            bag_command,
+            stdout=bag_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
+        )
+
+        import rclpy
+        from rclpy.executors import SingleThreadedExecutor
+
+        rclpy.init(args=None)
+        evaluator = create_evaluator(scenario, run_dir)
+        injector = create_injector(scenario)
+        executor = SingleThreadedExecutor()
+        executor.add_node(evaluator)
+        executor.add_node(injector)
+        deadline = time.monotonic() + scenario.duration_sec + settle_sec
+        while time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.1)
+            if integration.poll() is not None:
+                integration_alive = False
+        # Keep the last evaluator sample deterministic and flush CSV files.
+        evaluator.finish()
+        safety_publishers = _topic_publisher_count("/cmd_vel")
+        result = evaluate_scenario(scenario, evaluator.recorder.samples, safety_publishers, integration_alive)
+        result.update({
+            "start_time": datetime.now(timezone.utc).isoformat(),
+            "duration": scenario.duration_sec,
+            "seed": scenario.seed,
+            "build_commit": _git(repo_root, "rev-parse", "HEAD"),
+            "baseline_commit": BASELINE_COMMIT,
+            "artifacts": {
+                "bag": str(run_dir / "rosbag"),
+                "csv": str(run_dir / "samples.csv"),
+                "timeline": str(run_dir / "timeline.csv"),
+                "logs": str(logs_dir),
+            },
+        })
+        result["real_cmd_vel_publishers"] = safety_publishers
+        result["recorded_topics"] = RECORDED_TOPICS
+        result["artifact_directory"] = str(run_dir)
+        write_result(run_dir, result)
+        return run_dir, result
+    except Exception as exc:  # report the exception without hiding cleanup
+        result = {
+            "validation_class": "SYNTHETIC_SOFTWARE_VALIDATION",
+            "data_class": "NOT_REAL_ROBOT_DATA",
+            "simulator_class": "NOT_GAZEBO_DATA",
+            "performance_claim": "NOT_COMPETITION_PERFORMANCE_EVIDENCE",
+            "authenticity_marker": "THIS_IS_SYNTHETIC_SOFTWARE_VALIDATION",
+            "scenario_id": scenario.scenario_id,
+            "scenario_name": scenario.name,
+            "result": "FAIL",
+            "overall_result": "FAIL",
+            "evidence_level": "SYNTHETIC_SOFTWARE_VALIDATION",
+            "gazebo": False,
+            "real_robot": False,
+            "performance_claim": False,
+            "sample_count": 0,
+            "checks": {"runner_exception": False},
+            "errors": [f"RUNNER_EXCEPTION: {type(exc).__name__}: {exc}"],
+            "warnings": [],
+        }
+        write_result(run_dir, result)
+        return run_dir, result
+    finally:
+        if executor is not None:
+            try:
+                executor.shutdown()
+            except Exception:
+                pass
+        for node in (evaluator, injector):
+            if node is not None:
+                try:
+                    node.destroy_node()
+                except Exception:
+                    pass
+        try:
+            import rclpy
+
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+        _stop_process(bag, "rosbag", logs_dir / "rosbag.log")
+        _stop_process(integration, "integration", logs_dir / "integration.log")
+        integration_log.close()
+        bag_log.close()
+
+
+def _write_summary(results_root: Path, entries: list[tuple[Path, dict[str, Any]]]) -> None:
+    results_root.mkdir(parents=True, exist_ok=True)
+    summary_csv = results_root / "summary.csv"
+    with summary_csv.open("w", newline="", encoding="utf-8") as handle:
+        fields = ["scenario_id", "result", "sample_count", "error_count", "warning_count", "artifact_directory"]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for path, result in entries:
+            writer.writerow({
+                "scenario_id": result.get("scenario_id", path.name),
+                "result": result.get("result", "FAIL"),
+                "sample_count": result.get("sample_count", 0),
+                "error_count": len(result.get("errors", [])),
+                "warning_count": len(result.get("warnings", [])),
+                "artifact_directory": str(path),
+            })
+    with (results_root / "summary.md").open("w", encoding="utf-8") as handle:
+        handle.write("# DG-202611 Synthetic Validation Summary\n\n")
+        handle.write("This is `SYNTHETIC_SOFTWARE_VALIDATION` only: `NOT_REAL_ROBOT_DATA`, `NOT_GAZEBO_DATA`, and `NOT_COMPETITION_PERFORMANCE_EVIDENCE`.\n\n")
+        for path, result in entries:
+            handle.write(f"- **{result.get('scenario_id', path.name)}**: **{result.get('result', 'FAIL')}**, samples={result.get('sample_count', 0)}, artifacts=`{path}`\n")
+
+
+def _paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    share = _default_share_dir()
+    scenario_dir = Path(args.scenario_dir) if args.scenario_dir else share / "config"
+    results_root = Path(args.results_root) if args.results_root else Path.home() / "dg202611_ws" / "results" / "synthetic"
+    repo_root = Path(args.repo_root) if args.repo_root else Path.cwd()
+    return scenario_dir, results_root, repo_root
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run DG-202611 S01-S04 synthetic ROS2 validation")
+    parser.add_argument("scenario", nargs="?", help="Scenario ID, e.g. S01")
+    parser.add_argument("--scenario-dir", type=Path)
+    parser.add_argument("--results-root", type=Path)
+    parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--settle-sec", type=float, default=2.0)
+    return parser
+
+
+def main(args: list[str] | None = None) -> int:
+    parsed = _parser().parse_args(args)
+    if not parsed.scenario:
+        _parser().error("scenario is required (use run_all_s01_s04 for the complete batch)")
+    scenario_dir, results_root, repo_root = _paths(parsed)
+    scenario_file = scenario_dir / f"{parsed.scenario.upper()}.yaml"
+    scenario = load_scenario(scenario_file)
+    path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec)
+    print(json.dumps({"scenario": scenario.scenario_id, "result": result["result"], "artifacts": str(path)}, ensure_ascii=False))
+    return 0 if result["result"] == "PASS" else 1
+
+
+def run_all_main(args: list[str] | None = None) -> int:
+    parsed = _parser().parse_args(args)
+    scenario_dir, results_root, repo_root = _paths(parsed)
+    entries: list[tuple[Path, dict[str, Any]]] = []
+    for scenario_id in ("S01", "S02", "S03", "S04"):
+        scenario_file = scenario_dir / f"{scenario_id}.yaml"
+        scenario = load_scenario(scenario_file)
+        path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec)
+        entries.append((path, result))
+        print(json.dumps({"scenario": scenario_id, "result": result["result"], "artifacts": str(path)}, ensure_ascii=False), flush=True)
+    _write_summary(results_root, entries)
+    return 0 if all(result.get("result") == "PASS" for _, result in entries) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
