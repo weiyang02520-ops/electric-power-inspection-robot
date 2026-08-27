@@ -207,6 +207,9 @@ class FusionConfig:
     initial_yaw_uncertainty: float = math.radians(20.0)
     odom_position_noise_per_m: float = 0.03
     odom_yaw_noise_per_rad: float = 0.05
+    # POC heuristic drift terms; these are not statistically calibrated covariance.
+    odom_position_noise_per_s: float = 0.005
+    odom_yaw_noise_per_s: float = math.radians(0.1)
     min_position_uncertainty: float = 0.05
     min_yaw_uncertainty: float = math.radians(1.0)
 
@@ -222,6 +225,7 @@ class FusionOutput:
     updated: bool
     reasons: tuple[str, ...]
     timestamp: float
+    global_anchored: bool
 
 
 def _compose(first: Pose2D, second: Pose2D, timestamp: float) -> Pose2D:
@@ -255,7 +259,10 @@ class MultisourceFusionCore:
         self._alignment_pairs: list[tuple[ENUPoint, Pose2D]] = []
         self._last_local_odom: Pose2D | None = None
         self._last_absolute_timestamps: dict[str, float] = {}
+        self._last_absolute_update_time: float | None = None
+        self._last_process_time: float | None = None
         self._map_pose: Pose2D | None = None
+        self._global_anchored = False
         self._position_uncertainty = self.config.initial_position_uncertainty
         self._yaw_uncertainty = self.config.initial_yaw_uncertainty
         self._last_output: FusionOutput | None = None
@@ -269,6 +276,8 @@ class MultisourceFusionCore:
             self.config.max_yaw_correction_step,
             self.config.odom_position_noise_per_m,
             self.config.odom_yaw_noise_per_rad,
+            self.config.odom_position_noise_per_s,
+            self.config.odom_yaw_noise_per_s,
         )
         if any(value < 0.0 for value in nonnegative):
             raise ValueError("fusion limits and noise values must be non-negative")
@@ -298,8 +307,17 @@ class MultisourceFusionCore:
         if not _finite(event.now):
             return self._output(event.now, INITIALIZING, None, False, ("INVALID_NOW",))
         reasons: list[str] = []
+        if self._last_process_time is not None:
+            if event.now < self._last_process_time:
+                reasons.append("FUSION_TIME_REVERSED")
+            else:
+                dt = event.now - self._last_process_time
+                self._position_uncertainty += self.config.odom_position_noise_per_s * dt
+                self._yaw_uncertainty += self.config.odom_yaw_noise_per_s * dt
+        self._last_process_time = event.now
+        reason_count = len(reasons)
         propagated = self._propagate_odom(event.local_odom, event.now, reasons)
-        if event.local_odom is not None and not propagated:
+        if event.local_odom is not None and not propagated and len(reasons) == reason_count:
             reasons.append("LOCAL_ODOM_REJECTED")
 
         if event.gnss is not None and not self._gnss_usable(event.gnss, event.now, reasons):
@@ -310,29 +328,62 @@ class MultisourceFusionCore:
 
         accepted_source: str | None = None
         updated = False
-        if gnss_update is not None:
-            gnss_pose, uncertainty_factor = gnss_update
-            updated = self._apply_absolute_update(
-                gnss_pose,
-                "GNSS",
-                self.config.gnss_residual_gate,
-                event.now,
-                reasons,
-                uncertainty_factor,
-            )
-            if updated:
-                accepted_source = "GNSS"
-        if lidar_update is not None:
-            lidar_applied = self._apply_absolute_update(
-                lidar_update.pose,
-                lidar_source or lidar_update.source.upper(),
-                self.config.lidar_residual_gate,
-                event.now,
-                reasons,
-            )
-            if lidar_applied:
-                updated = True
-                accepted_source = lidar_source or lidar_update.source.upper()
+        if not self._global_anchored:
+            # First global anchor priority: Scan-to-Map, then AMCL, then aligned GNSS.
+            if lidar_update is not None:
+                lidar_source_name = lidar_source or lidar_update.source.upper()
+                updated = self._apply_absolute_update(
+                    lidar_update.pose,
+                    lidar_source_name,
+                    self.config.lidar_residual_gate,
+                    event.now,
+                    reasons,
+                    0.5,
+                    correct_yaw=True,
+                )
+                if updated:
+                    accepted_source = lidar_source_name
+            elif gnss_update is not None:
+                gnss_pose, uncertainty_factor = gnss_update
+                updated = self._apply_absolute_update(
+                    gnss_pose,
+                    "GNSS",
+                    self.config.gnss_residual_gate,
+                    event.now,
+                    reasons,
+                    uncertainty_factor,
+                    correct_yaw=False,
+                )
+                if updated:
+                    accepted_source = "GNSS"
+        else:
+            if gnss_update is not None:
+                gnss_pose, uncertainty_factor = gnss_update
+                updated = self._apply_absolute_update(
+                    gnss_pose,
+                    "GNSS",
+                    self.config.gnss_residual_gate,
+                    event.now,
+                    reasons,
+                    uncertainty_factor,
+                    correct_yaw=False,
+                )
+                if updated:
+                    accepted_source = "GNSS"
+            if lidar_update is not None:
+                lidar_source_name = lidar_source or lidar_update.source.upper()
+                lidar_applied = self._apply_absolute_update(
+                    lidar_update.pose,
+                    lidar_source_name,
+                    self.config.lidar_residual_gate,
+                    event.now,
+                    reasons,
+                    0.5,
+                    correct_yaw=True,
+                )
+                if lidar_applied:
+                    updated = True
+                    accepted_source = lidar_source_name
 
         if accepted_source == "GNSS":
             mode = GNSS_AIDED
@@ -343,7 +394,13 @@ class MultisourceFusionCore:
         elif any(reason.startswith("GNSS_") or reason.startswith("LIDAR_") for reason in reasons):
             mode = DEAD_RECKONING
         else:
-            mode = NOMINAL if propagated else DEAD_RECKONING
+            mode = INITIALIZING if not self._global_anchored else NOMINAL
+            if (
+                self._global_anchored
+                and self._last_absolute_update_time is not None
+                and event.now - self._last_absolute_update_time > self.config.freshness_timeout
+            ):
+                mode = DEAD_RECKONING
         if not updated and any(
             reason.endswith("_OUTLIER") or reason.endswith("_OLD_MEASUREMENT")
             for reason in reasons
@@ -361,7 +418,9 @@ class MultisourceFusionCore:
         if not _finite_pose(odom) or odom.timestamp > now + 1e-6:
             reasons.append("LOCAL_ODOM_INVALID")
             return False
-        if self._last_local_odom is not None and odom.timestamp <= self._last_local_odom.timestamp:
+        if self._last_local_odom is not None and odom.timestamp == self._last_local_odom.timestamp:
+            return False
+        if self._last_local_odom is not None and odom.timestamp < self._last_local_odom.timestamp:
             reasons.append("LOCAL_ODOM_TIME_REVERSED")
             return False
         if self._map_pose is None:
@@ -436,38 +495,54 @@ class MultisourceFusionCore:
         now: float,
         reasons: list[str],
         uncertainty_factor: float = 0.5,
+        correct_yaw: bool = True,
     ) -> bool:
         if not _finite_pose(measurement) or self._map_pose is None:
             reasons.append(f"{source}_INVALID")
             return False
         last_timestamp = self._last_absolute_timestamps.get(source)
+        if last_timestamp is not None and measurement.timestamp == last_timestamp:
+            return False
         if last_timestamp is not None and measurement.timestamp <= last_timestamp:
             reasons.append(f"{source}_OLD_MEASUREMENT")
             return False
         dx = measurement.x - self._map_pose.x
         dy = measurement.y - self._map_pose.y
         dyaw = wrap_angle(measurement.yaw - self._map_pose.yaw)
-        if math.hypot(dx, dy) > residual_gate or abs(dyaw) > self.config.yaw_residual_gate:
+        if self._global_anchored and (math.hypot(dx, dy) > residual_gate or abs(dyaw) > self.config.yaw_residual_gate):
             reasons.append(f"{source}_OUTLIER")
             return False
-        distance = math.hypot(dx, dy)
-        if distance > self.config.max_correction_step > 0.0:
-            scale = self.config.max_correction_step / distance
-            dx *= scale
-            dy *= scale
-        elif self.config.max_correction_step == 0.0:
-            dx = dy = 0.0
-        dyaw = max(-self.config.max_yaw_correction_step, min(self.config.max_yaw_correction_step, dyaw))
-        self._map_pose = Pose2D(self._map_pose.x + dx, self._map_pose.y + dy, wrap_angle(self._map_pose.yaw + dyaw), now)
+        if not self._global_anchored:
+            self._map_pose = Pose2D(
+                measurement.x,
+                measurement.y,
+                measurement.yaw if correct_yaw else self._map_pose.yaw,
+                now,
+            )
+            self._global_anchored = True
+        else:
+            distance = math.hypot(dx, dy)
+            if distance > self.config.max_correction_step > 0.0:
+                scale = self.config.max_correction_step / distance
+                dx *= scale
+                dy *= scale
+            elif self.config.max_correction_step == 0.0:
+                dx = dy = 0.0
+            if not correct_yaw:
+                dyaw = 0.0
+            dyaw = max(-self.config.max_yaw_correction_step, min(self.config.max_yaw_correction_step, dyaw))
+            self._map_pose = Pose2D(self._map_pose.x + dx, self._map_pose.y + dy, wrap_angle(self._map_pose.yaw + dyaw), now)
         self._position_uncertainty = max(
             self.config.min_position_uncertainty,
             self._position_uncertainty * uncertainty_factor,
         )
-        self._yaw_uncertainty = max(
-            self.config.min_yaw_uncertainty,
-            self._yaw_uncertainty * uncertainty_factor,
-        )
+        if correct_yaw:
+            self._yaw_uncertainty = max(
+                self.config.min_yaw_uncertainty,
+                self._yaw_uncertainty * uncertainty_factor,
+            )
         self._last_absolute_timestamps[source] = measurement.timestamp
+        self._last_absolute_update_time = now
         return True
 
     def _output(
@@ -491,4 +566,5 @@ class MultisourceFusionCore:
             updated=updated,
             reasons=tuple(dict.fromkeys(reasons)),
             timestamp=now,
+            global_anchored=self._global_anchored,
         )

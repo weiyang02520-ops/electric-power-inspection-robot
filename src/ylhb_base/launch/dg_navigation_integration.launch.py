@@ -29,6 +29,12 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     required_signals = LaunchConfiguration("required_signals")
     enable_multisource_fusion = LaunchConfiguration("enable_multisource_fusion")
+    gnss_origin_latitude = LaunchConfiguration("gnss_origin_latitude")
+    gnss_origin_longitude = LaunchConfiguration("gnss_origin_longitude")
+    gnss_origin_altitude = LaunchConfiguration("gnss_origin_altitude")
+    map_enu_yaw = LaunchConfiguration("map_enu_yaw")
+    map_enu_offset_x = LaunchConfiguration("map_enu_offset_x")
+    map_enu_offset_y = LaunchConfiguration("map_enu_offset_y")
 
     nav2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(package_share, "launch", "navigation.launch.py")),
@@ -138,6 +144,12 @@ def generate_launch_description():
                 "fusion_pose_topic": "/dg/fusion/pose",
                 "fusion_status_topic": "/dg/fusion/status",
                 "publish_tf": False,
+                "gnss_origin_latitude": gnss_origin_latitude,
+                "gnss_origin_longitude": gnss_origin_longitude,
+                "gnss_origin_altitude": gnss_origin_altitude,
+                "map_enu_yaw": map_enu_yaw,
+                "map_enu_offset_x": map_enu_offset_x,
+                "map_enu_offset_y": map_enu_offset_y,
             }
         ],
     )
@@ -150,6 +162,12 @@ def generate_launch_description():
                 default_value="true",
                 description="Start the DG side-channel multi-source fusion POC",
             ),
+            DeclareLaunchArgument("gnss_origin_latitude", default_value="nan"),
+            DeclareLaunchArgument("gnss_origin_longitude", default_value="nan"),
+            DeclareLaunchArgument("gnss_origin_altitude", default_value="0.0"),
+            DeclareLaunchArgument("map_enu_yaw", default_value="nan"),
+            DeclareLaunchArgument("map_enu_offset_x", default_value="0.0"),
+            DeclareLaunchArgument("map_enu_offset_y", default_value="0.0"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("map", default_value=default_map),
             DeclareLaunchArgument(

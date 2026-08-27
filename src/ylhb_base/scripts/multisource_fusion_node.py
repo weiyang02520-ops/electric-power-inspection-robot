@@ -128,16 +128,24 @@ def create_node(node_name: str) -> Any:
             )
             self._max_amcl_covariance = float(self.get_parameter("max_amcl_covariance").value)
             self._local_odom: Pose2D | None = None
+            self._odom_sequence = 0
+            self._odom_consumed_sequence = 0
             self._gnss_fix: Any | None = None
             self._gnss_fix_received_at: float | None = None
+            self._gnss_sequence = 0
+            self._gnss_consumed_sequence = 0
             self._gnss_state = "REJECTED"
             self._gnss_accepted = False
             self._gnss_quality_received_at: float | None = None
             self._amcl_pose: Pose2D | None = None
             self._amcl_received_at: float | None = None
+            self._amcl_sequence = 0
+            self._amcl_consumed_sequence = 0
             self._amcl_state = "REJECTED"
             self._scan_match_pose: Pose2D | None = None
             self._scan_match_received_at: float | None = None
+            self._scan_match_sequence = 0
+            self._scan_match_consumed_sequence = 0
             self._scan_match_state = "REJECTED"
             self._scan_match_accepted = False
 
@@ -193,11 +201,13 @@ def create_node(node_name: str) -> Any:
                 return
             stamp = _stamp_to_seconds(message.header.stamp) or now
             self._local_odom = Pose2D(float(message.pose.pose.position.x), float(message.pose.pose.position.y), yaw, stamp)
+            self._odom_sequence += 1
 
         def _on_gnss_fix(self, message: Any) -> None:
             self._gnss_fix = message
             self._gnss_fix_received_at = self._now()
             self._gnss_accepted = True
+            self._gnss_sequence += 1
 
         def _on_gnss_quality(self, message: Any) -> None:
             selected = self._status(message, "GNSS")
@@ -207,6 +217,7 @@ def create_node(node_name: str) -> Any:
             self._gnss_state = _value(values, "current_state", _value(values, "decision", "REJECTED")).upper()
             self._gnss_accepted = _bool_value(_value(values, "accepted", "false"))
             self._gnss_quality_received_at = self._now()
+            self._gnss_sequence += 1
 
         def _on_amcl(self, message: Any) -> None:
             now = self._now()
@@ -220,6 +231,7 @@ def create_node(node_name: str) -> Any:
             self._amcl_pose = Pose2D(float(message.pose.pose.position.x), float(message.pose.pose.position.y), yaw, stamp)
             self._amcl_state = "GOOD" if math.isfinite(covariance) and covariance <= self._max_amcl_covariance else "REJECTED"
             self._amcl_received_at = now
+            self._amcl_sequence += 1
 
         def _on_scan_match_pose(self, message: Any) -> None:
             now = self._now()
@@ -230,6 +242,7 @@ def create_node(node_name: str) -> Any:
             stamp = _stamp_to_seconds(message.header.stamp) or now
             self._scan_match_pose = Pose2D(float(message.pose.position.x), float(message.pose.position.y), yaw, stamp)
             self._scan_match_received_at = now
+            self._scan_match_sequence += 1
 
         def _on_match_quality(self, message: Any) -> None:
             selected = self._status(message, "MATCH")
@@ -239,6 +252,7 @@ def create_node(node_name: str) -> Any:
             self._scan_match_accepted = _bool_value(_value(values, "accepted", "false"))
             self._scan_match_state = "GOOD" if self._scan_match_accepted and int(selected.level) < 2 else "REJECTED"
             self._scan_match_received_at = self._now()
+            self._scan_match_sequence += 1
 
         def _gnss_measurement(self, now: float) -> GnssPosition | None:
             if self._gnss_fix is None:
@@ -265,17 +279,25 @@ def create_node(node_name: str) -> Any:
 
         def _tick(self) -> None:
             now = self._now()
-            scan = self._map_measurement(self._scan_match_pose, self._scan_match_state, self._scan_match_accepted, "scan_match", now)
-            amcl = self._map_measurement(self._amcl_pose, self._amcl_state, self._amcl_state == "GOOD", "amcl", now)
+            new_odom = self._local_odom if self._odom_sequence != self._odom_consumed_sequence else None
+            new_gnss = self._gnss_measurement(now) if self._gnss_sequence != self._gnss_consumed_sequence else None
+            new_scan_pose = self._scan_match_pose if self._scan_match_sequence != self._scan_match_consumed_sequence else None
+            new_amcl_pose = self._amcl_pose if self._amcl_sequence != self._amcl_consumed_sequence else None
+            scan = self._map_measurement(new_scan_pose, self._scan_match_state, self._scan_match_accepted, "scan_match", now)
+            amcl = self._map_measurement(new_amcl_pose, self._amcl_state, self._amcl_state == "GOOD", "amcl", now)
             output = self._core.process(
                 FusionInput(
                     now=now,
-                    local_odom=self._local_odom,
-                    gnss=self._gnss_measurement(now),
+                    local_odom=new_odom,
+                    gnss=new_gnss,
                     scan_match_pose=scan,
                     amcl_pose=amcl,
                 )
             )
+            self._odom_consumed_sequence = self._odom_sequence
+            self._gnss_consumed_sequence = self._gnss_sequence
+            self._scan_match_consumed_sequence = self._scan_match_sequence
+            self._amcl_consumed_sequence = self._amcl_sequence
             self._publish(output)
 
         def _publish(self, output: Any) -> None:
@@ -312,6 +334,8 @@ def create_node(node_name: str) -> Any:
                 "position_uncertainty": output.position_uncertainty,
                 "yaw_uncertainty": output.yaw_uncertainty,
                 "alignment_ready": self._core.alignment is not None,
+                "global_anchored": output.global_anchored,
+                "uncertainty_model": "POC_HEURISTIC_NOT_CALIBRATED_COVARIANCE",
                 "map_to_odom_x": output.map_to_odom.x if output.map_to_odom else None,
                 "map_to_odom_y": output.map_to_odom.y if output.map_to_odom else None,
                 "map_to_odom_yaw": output.map_to_odom.yaw if output.map_to_odom else None,

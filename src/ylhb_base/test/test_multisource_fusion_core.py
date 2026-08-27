@@ -121,7 +121,7 @@ class FusionCoreTests(unittest.TestCase):
         second = fusion.process(FusionInput(1.0, local_odom=odom(1.0, timestamp=1.0)))
         self.assertIsNotNone(first.map_pose)
         self.assertAlmostEqual(second.map_pose.x, 1.0, places=6)  # type: ignore[union-attr]
-        self.assertEqual(second.fusion_mode, "NOMINAL")
+        self.assertEqual(second.fusion_mode, "INITIALIZING")
 
     def test_gnss_good_corrects_xy_without_changing_yaw(self) -> None:
         fusion = core()
@@ -200,21 +200,24 @@ class FusionCoreTests(unittest.TestCase):
     def test_gnss_jump_is_rejected(self) -> None:
         fusion = core()
         fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
-        output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(longitude=120.0002, timestamp=1.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), gnss=gnss(longitude=120.0002, timestamp=2.0)))
         self.assertEqual(output.fusion_mode, REJECTED_UPDATE)
         self.assertIn("GNSS_OUTLIER", output.reasons)
 
     def test_lidar_jump_is_rejected(self) -> None:
         fusion = core()
         fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
-        output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(6.0, timestamp=1.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(0.0, timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), amcl_pose=lidar(6.0, timestamp=2.0)))
         self.assertEqual(output.fusion_mode, REJECTED_UPDATE)
         self.assertIn("AMCL_OUTLIER", output.reasons)
 
     def test_correction_step_is_bounded(self) -> None:
         fusion = core(max_correction_step=0.2, gnss_residual_gate=8.0)
         fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
-        output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(longitude=120.00001, timestamp=1.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), gnss=gnss(longitude=120.00001, timestamp=2.0)))
         self.assertAlmostEqual(output.map_pose.x, 0.2, places=3)  # type: ignore[union-attr]
 
     def test_gnss_outage_continues_dead_reckoning(self) -> None:
@@ -294,6 +297,114 @@ class FusionCoreTests(unittest.TestCase):
         fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0)))
         output = fusion.process(FusionInput(2.0, local_odom=odom(1.0, timestamp=0.5)))
         self.assertIn("LOCAL_ODOM_TIME_REVERSED", output.reasons)
+
+    def test_duplicate_odom_is_ignored_without_time_reversal(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(FusionInput(0.1, local_odom=odom(0.0, timestamp=0.0)))
+        self.assertNotIn("LOCAL_ODOM_TIME_REVERSED", output.reasons)
+        self.assertNotIn("REJECTED_UPDATE", output.reasons)
+
+    def test_first_amcl_global_anchor_can_be_far_from_odom_origin(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(20.0, 15.0, timestamp=1.0)))
+        self.assertTrue(output.global_anchored)
+        self.assertAlmostEqual(output.map_pose.x, 20.0, places=6)  # type: ignore[union-attr]
+        self.assertAlmostEqual(output.map_pose.y, 15.0, places=6)  # type: ignore[union-attr]
+
+    def test_first_scan_match_global_anchor_has_priority_over_amcl(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(
+            FusionInput(
+                1.0,
+                local_odom=odom(0.0, timestamp=1.0),
+                scan_match_pose=lidar(12.0, 4.0, 0.3, 1.0, source="scan_match"),
+                amcl_pose=lidar(20.0, 15.0, timestamp=1.0),
+            )
+        )
+        self.assertEqual(output.accepted_source, "SCAN_MATCH")
+        self.assertAlmostEqual(output.map_pose.x, 12.0, places=6)  # type: ignore[union-attr]
+
+    def test_first_aligned_gnss_anchor_can_establish_global_translation(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(longitude=120.0001, timestamp=1.0)))
+        self.assertEqual(output.accepted_source, "GNSS")
+        self.assertGreater(output.map_pose.x, 8.0)  # type: ignore[union-attr]
+
+    def test_post_anchor_large_jump_is_rejected_by_residual_gate(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(20.0, 15.0, timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), amcl_pose=lidar(100.0, 100.0, timestamp=2.0)))
+        self.assertEqual(output.fusion_mode, REJECTED_UPDATE)
+        self.assertIn("AMCL_OUTLIER", output.reasons)
+
+    def test_gnss_correction_reduces_position_but_not_yaw_uncertainty(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(timestamp=1.0)))
+        before = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0)))
+        after = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), gnss=gnss(longitude=120.00001, timestamp=2.0)))
+        self.assertLess(after.position_uncertainty, before.position_uncertainty)
+        self.assertAlmostEqual(after.yaw_uncertainty, before.yaw_uncertainty, places=9)
+        self.assertAlmostEqual(after.map_pose.yaw, before.map_pose.yaw, places=9)  # type: ignore[union-attr]
+
+    def test_lidar_correction_can_reduce_yaw_uncertainty(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(0.0, timestamp=1.0)))
+        before = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0)))
+        after = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), scan_match_pose=lidar(0.1, yaw=0.1, timestamp=2.0, source="scan_match")))
+        self.assertLess(after.yaw_uncertainty, before.yaw_uncertainty)
+
+    def test_duplicate_gnss_for_ten_ticks_is_not_rejected(self) -> None:
+        fusion = core(freshness_timeout=100.0)
+        measurement = gnss(timestamp=1.0)
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        first = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=measurement))
+        for tick in range(2, 12):
+            output = fusion.process(FusionInput(float(tick), local_odom=odom(0.0, timestamp=float(tick)), gnss=measurement))
+            self.assertNotEqual(output.fusion_mode, REJECTED_UPDATE)
+            self.assertNotIn("GNSS_OLD_MEASUREMENT", output.reasons)
+        self.assertEqual(first.accepted_source, "GNSS")
+
+    def test_duplicate_amcl_is_not_rejected(self) -> None:
+        fusion = core(freshness_timeout=100.0)
+        measurement = lidar(1.0, timestamp=1.0)
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=measurement))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), amcl_pose=measurement))
+        self.assertNotEqual(output.fusion_mode, REJECTED_UPDATE)
+        self.assertNotIn("AMCL_OLD_MEASUREMENT", output.reasons)
+
+    def test_duplicate_scan_to_map_is_not_rejected(self) -> None:
+        fusion = core(freshness_timeout=100.0)
+        measurement = lidar(1.0, timestamp=1.0, source="scan_match")
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), scan_match_pose=measurement))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), scan_match_pose=measurement))
+        self.assertNotEqual(output.fusion_mode, REJECTED_UPDATE)
+        self.assertNotIn("SCAN_MATCH_OLD_MEASUREMENT", output.reasons)
+
+    def test_mixed_frequency_ten_second_simulation_is_stable(self) -> None:
+        fusion = core(freshness_timeout=2.0)
+        outputs = []
+        for tick in range(1, 101):
+            now = tick * 0.1
+            current_odom = odom(now * 0.1, timestamp=now)
+            current_gnss = gnss(timestamp=now) if tick % 10 == 0 else None
+            current_amcl = lidar(now * 0.1, timestamp=now) if tick % 2 == 0 else None
+            output = fusion.process(FusionInput(now, current_odom, current_gnss, amcl_pose=current_amcl))
+            outputs.append(output)
+            self.assertNotIn("LOCAL_ODOM_TIME_REVERSED", output.reasons)
+            self.assertNotEqual(output.fusion_mode, REJECTED_UPDATE)
+            self.assertTrue(math.isfinite(output.position_uncertainty))
+            self.assertTrue(math.isfinite(output.yaw_uncertainty))
+        self.assertEqual(fusion._last_absolute_timestamps["GNSS"], 10.0)
+        self.assertIsNotNone(outputs[-1].map_pose)
 
 
 if __name__ == "__main__":

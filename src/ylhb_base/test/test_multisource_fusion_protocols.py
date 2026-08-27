@@ -49,12 +49,35 @@ class MultisourceFusionProtocolTests(unittest.TestCase):
         self.assertIn('self.declare_parameter("publish_tf", False)', text)
         self.assertNotIn("TransformBroadcaster", text)
 
+    def test_wrapper_tracks_and_consumes_message_sequences(self) -> None:
+        text = (SCRIPTS / "multisource_fusion_node.py").read_text(encoding="utf-8")
+        for field in (
+            "_odom_sequence",
+            "_gnss_sequence",
+            "_amcl_sequence",
+            "_scan_match_sequence",
+            "_odom_consumed_sequence",
+            "_gnss_consumed_sequence",
+            "_amcl_consumed_sequence",
+            "_scan_match_consumed_sequence",
+        ):
+            self.assertIn(field, text)
+
     def test_launch_has_optional_multisource_fusion_switch(self) -> None:
         text = LAUNCH.read_text(encoding="utf-8")
         self.assertIn('"enable_multisource_fusion"', text)
         self.assertIn('default_value="true"', text)
         self.assertIn('executable="multisource_fusion_node"', text)
         self.assertIn('condition=IfCondition(enable_multisource_fusion)', text)
+        for argument in (
+            "gnss_origin_latitude",
+            "gnss_origin_longitude",
+            "gnss_origin_altitude",
+            "map_enu_yaw",
+            "map_enu_offset_x",
+            "map_enu_offset_y",
+        ):
+            self.assertIn(f'"{argument}"', text)
 
     def test_launch_keeps_fusion_as_side_channel(self) -> None:
         text = LAUNCH.read_text(encoding="utf-8")
