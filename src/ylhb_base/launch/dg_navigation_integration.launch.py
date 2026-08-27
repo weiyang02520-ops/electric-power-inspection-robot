@@ -15,6 +15,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -144,12 +145,12 @@ def generate_launch_description():
                 "fusion_pose_topic": "/dg/fusion/pose",
                 "fusion_status_topic": "/dg/fusion/status",
                 "publish_tf": False,
-                "gnss_origin_latitude": gnss_origin_latitude,
-                "gnss_origin_longitude": gnss_origin_longitude,
-                "gnss_origin_altitude": gnss_origin_altitude,
-                "map_enu_yaw": map_enu_yaw,
-                "map_enu_offset_x": map_enu_offset_x,
-                "map_enu_offset_y": map_enu_offset_y,
+                "gnss_origin_latitude": ParameterValue(gnss_origin_latitude, value_type=float),
+                "gnss_origin_longitude": ParameterValue(gnss_origin_longitude, value_type=float),
+                "gnss_origin_altitude": ParameterValue(gnss_origin_altitude, value_type=float),
+                "map_enu_yaw": ParameterValue(map_enu_yaw, value_type=float),
+                "map_enu_offset_x": ParameterValue(map_enu_offset_x, value_type=float),
+                "map_enu_offset_y": ParameterValue(map_enu_offset_y, value_type=float),
             }
         ],
     )

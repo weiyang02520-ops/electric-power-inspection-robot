@@ -270,6 +270,59 @@ class FusionCoreTests(unittest.TestCase):
         output = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(longitude=120.00001, timestamp=1.0)))
         self.assertEqual(output.fusion_mode, WAITING_ALIGNMENT)
         self.assertIsNone(output.accepted_source)
+        self.assertIn("GNSS_ALIGNMENT_UNAVAILABLE", output.reasons)
+
+    def test_amcl_anchor_is_not_overridden_by_missing_gnss_alignment(self) -> None:
+        fusion = MultisourceFusionCore(FusionConfig(gnss_reference=REFERENCE, max_correction_step=10.0))
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(
+            FusionInput(
+                1.0,
+                local_odom=odom(0.0, timestamp=1.0),
+                gnss=gnss(longitude=120.00001, timestamp=1.0),
+                amcl_pose=lidar(20.0, 15.0, timestamp=1.0),
+            )
+        )
+        self.assertEqual(output.fusion_mode, LIDAR_AIDED)
+        self.assertEqual(output.accepted_source, "AMCL")
+        self.assertNotEqual(output.fusion_mode, WAITING_ALIGNMENT)
+        self.assertIn("GNSS_ALIGNMENT_UNAVAILABLE", output.reasons)
+
+    def test_anchored_system_keeps_operating_when_new_gnss_lacks_alignment(self) -> None:
+        fusion = MultisourceFusionCore(FusionConfig(gnss_reference=REFERENCE, max_correction_step=10.0))
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        anchored = fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(20.0, 15.0, timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(0.0, timestamp=2.0), gnss=gnss(longitude=120.00001, timestamp=2.0)))
+        self.assertEqual(anchored.fusion_mode, LIDAR_AIDED)
+        self.assertNotEqual(output.fusion_mode, WAITING_ALIGNMENT)
+        self.assertIsNone(output.accepted_source)
+        self.assertAlmostEqual(output.map_pose.x, anchored.map_pose.x, places=6)  # type: ignore[union-attr]
+        self.assertAlmostEqual(output.map_pose.y, anchored.map_pose.y, places=6)  # type: ignore[union-attr]
+        self.assertIn("GNSS_ALIGNMENT_UNAVAILABLE", output.reasons)
+
+    def test_scan_match_anchor_is_not_overridden_by_missing_gnss_alignment(self) -> None:
+        fusion = MultisourceFusionCore(FusionConfig(gnss_reference=REFERENCE))
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        output = fusion.process(
+            FusionInput(
+                1.0,
+                local_odom=odom(0.0, timestamp=1.0),
+                gnss=gnss(timestamp=1.0),
+                scan_match_pose=lidar(12.0, 4.0, 0.3, 1.0, source="scan_match"),
+            )
+        )
+        self.assertEqual(output.fusion_mode, LIDAR_AIDED)
+        self.assertEqual(output.accepted_source, "SCAN_MATCH")
+        self.assertNotEqual(output.fusion_mode, WAITING_ALIGNMENT)
+
+    def test_missing_alignment_gnss_never_updates_map_pose(self) -> None:
+        fusion = MultisourceFusionCore(FusionConfig(gnss_reference=REFERENCE))
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        before = fusion.process(FusionInput(1.0, local_odom=odom(1.0, timestamp=1.0)))
+        output = fusion.process(FusionInput(2.0, local_odom=odom(1.0, timestamp=2.0), gnss=gnss(longitude=120.0001, timestamp=2.0)))
+        self.assertAlmostEqual(output.map_pose.x, before.map_pose.x, places=6)  # type: ignore[union-attr]
+        self.assertIsNone(output.accepted_source)
+        self.assertIn("GNSS_ALIGNMENT_UNAVAILABLE", output.reasons)
 
     def test_alignment_completion_enables_gnss(self) -> None:
         fusion = MultisourceFusionCore(FusionConfig(gnss_reference=REFERENCE, max_correction_step=10.0))

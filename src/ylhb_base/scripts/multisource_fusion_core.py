@@ -322,7 +322,7 @@ class MultisourceFusionCore:
 
         if event.gnss is not None and not self._gnss_usable(event.gnss, event.now, reasons):
             if event.gnss.state.upper() not in {REJECTED, STALE} and event.gnss.accepted:
-                reasons.append("GNSS_WAITING_ALIGNMENT" if self._alignment is None else "GNSS_NOT_USABLE")
+                reasons.append("GNSS_ALIGNMENT_UNAVAILABLE" if self._alignment is None else "GNSS_NOT_USABLE")
         gnss_update = self._gnss_update(event.gnss, event.now, reasons)
         lidar_update, lidar_source = self._select_lidar_update(event, event.now, reasons)
 
@@ -406,7 +406,14 @@ class MultisourceFusionCore:
             for reason in reasons
         ):
             mode = REJECTED_UPDATE
-        if event.gnss is not None and self._alignment is None and event.gnss.accepted and event.gnss.state.upper() not in {REJECTED, STALE}:
+        if (
+            event.gnss is not None
+            and self._alignment is None
+            and not self._global_anchored
+            and accepted_source is None
+            and event.gnss.accepted
+            and event.gnss.state.upper() not in {REJECTED, STALE}
+        ):
             mode = WAITING_ALIGNMENT
         output = self._output(event.now, mode, accepted_source, updated, reasons)
         self._last_output = output

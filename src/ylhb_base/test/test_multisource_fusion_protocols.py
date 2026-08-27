@@ -79,6 +79,19 @@ class MultisourceFusionProtocolTests(unittest.TestCase):
         ):
             self.assertIn(f'"{argument}"', text)
 
+    def test_launch_alignment_parameters_are_explicit_float_values(self) -> None:
+        text = LAUNCH.read_text(encoding="utf-8")
+        self.assertIn("from launch_ros.parameter_descriptions import ParameterValue", text)
+        for argument in (
+            "gnss_origin_latitude",
+            "gnss_origin_longitude",
+            "gnss_origin_altitude",
+            "map_enu_yaw",
+            "map_enu_offset_x",
+            "map_enu_offset_y",
+        ):
+            self.assertIn(f'ParameterValue({argument}, value_type=float)', text)
+
     def test_launch_keeps_fusion_as_side_channel(self) -> None:
         text = LAUNCH.read_text(encoding="utf-8")
         self.assertIn('"publish_tf": False', text)
