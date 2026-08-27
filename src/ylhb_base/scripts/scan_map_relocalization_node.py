@@ -254,6 +254,12 @@ def main(args=None):
             self.declare_parameter("max_scan_range", 8.0)
             self.declare_parameter("sample_stride", 2)
             self.declare_parameter("self_publish_ignore_seconds", 1.0)
+            self.declare_parameter("seed_topic", "/dg/relocalization/seed")
+            self.declare_parameter("map_topic", "/map")
+            self.declare_parameter("scan_topic", "/scan")
+            self.declare_parameter("initialpose_topic", "/initialpose")
+            self.declare_parameter("scan_match_pose_topic", "/scan_match_pose")
+            self.declare_parameter("match_quality_topic", "/dg/relocalization/match_quality")
 
             self._map_msg = None
             self._distance_field = None
@@ -268,27 +274,31 @@ def main(args=None):
             self._tf_listener = TransformListener(self._tf_buffer, self)
             self._initialpose_pub = self.create_publisher(
                 PoseWithCovarianceStamped,
-                "/initialpose",
+                str(self.get_parameter("initialpose_topic").value),
                 initial_pose_qos_profile(),
             )
             self._scan_match_pub = self.create_publisher(
-                PoseStamped, "/scan_match_pose", 10
+                PoseStamped, str(self.get_parameter("scan_match_pose_topic").value), 10
             )
             self._match_quality_pub = self.create_publisher(
-                DiagnosticArray, "/dg/relocalization/match_quality", 10
+                DiagnosticArray, str(self.get_parameter("match_quality_topic").value), 10
             )
 
-            self.create_subscription(OccupancyGrid, "/map", self._on_map, 1)
-            self.create_subscription(LaserScan, "/scan", self._on_scan, 10)
+            self.create_subscription(
+                OccupancyGrid, str(self.get_parameter("map_topic").value), self._on_map, 1
+            )
+            self.create_subscription(
+                LaserScan, str(self.get_parameter("scan_topic").value), self._on_scan, 10
+            )
             self.create_subscription(
                 PoseWithCovarianceStamped,
-                "/initialpose",
+                str(self.get_parameter("initialpose_topic").value),
                 self._on_initialpose,
                 10,
             )
             self.create_subscription(
                 PoseWithCovarianceStamped,
-                "/dg/relocalization/seed",
+                str(self.get_parameter("seed_topic").value),
                 self._on_seed,
                 10,
             )

@@ -110,6 +110,10 @@ install(PROGRAMS
   scripts/gnss_quality_node.py
   scripts/active_relocalization_core.py
   scripts/active_relocalization_node.py
+  scripts/navigation_health_core.py
+  scripts/navigation_health_node.py
+  scripts/cmd_vel_arbiter_core.py
+  scripts/cmd_vel_arbiter_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -170,6 +174,10 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_lidar_robust_features test/test_lidar_robust_features.py)
   ament_add_pytest_test(test_gnss_quality_gate test/test_gnss_quality_gate.py)
   ament_add_pytest_test(test_active_relocalization_core test/test_active_relocalization_core.py)
+  ament_add_pytest_test(test_navigation_health_core test/test_navigation_health_core.py)
+  ament_add_pytest_test(test_cmd_vel_arbiter_core test/test_cmd_vel_arbiter_core.py)
+  ament_add_pytest_test(test_navigation_integration_core test/test_navigation_integration_core.py)
+  ament_add_pytest_test(test_navigation_protocols test/test_navigation_protocols.py)
 endif()
 
 ament_package()
