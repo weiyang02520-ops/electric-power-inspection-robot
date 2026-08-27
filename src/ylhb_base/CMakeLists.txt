@@ -105,19 +105,28 @@ install(PROGRAMS
   scripts/vision_node.py
   scripts/auto_align.py
   scripts/lidar_robust_features.py
-  scripts/lidar_robust_node.py
   scripts/gnss_quality_gate.py
-  scripts/gnss_quality_node.py
   scripts/active_relocalization_core.py
-  scripts/active_relocalization_node.py
   scripts/navigation_health_core.py
-  scripts/navigation_health_node.py
   scripts/cmd_vel_arbiter_core.py
-  scripts/cmd_vel_arbiter_node.py
   scripts/multisource_fusion_core.py
-  scripts/multisource_fusion_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
+
+# Keep the runtime executable names stable and extensionless, matching the
+# launch descriptions and the existing scan-map node installation.
+install(PROGRAMS scripts/lidar_robust_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME lidar_robust_node)
+install(PROGRAMS scripts/gnss_quality_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME gnss_quality_node)
+install(PROGRAMS scripts/active_relocalization_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME active_relocalization_node)
+install(PROGRAMS scripts/navigation_health_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME navigation_health_node)
+install(PROGRAMS scripts/cmd_vel_arbiter_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME cmd_vel_arbiter_node)
+install(PROGRAMS scripts/multisource_fusion_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME multisource_fusion_node)
 
 install(PROGRAMS
   scripts/amcl_swing_relocalization_node.py

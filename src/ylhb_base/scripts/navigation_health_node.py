@@ -72,7 +72,9 @@ def create_node(node_name: str) -> Any:
             self.declare_parameter("freshness_timeout", 1.0)
             self.declare_parameter("max_amcl_covariance", 0.5)
             self.declare_parameter("min_lidar_quality", 0.2)
-            self.declare_parameter("required_signals", [])
+            # An empty list is inferred as BYTE_ARRAY by rclpy on Humble;
+            # use a blank string sentinel for the intended string array.
+            self.declare_parameter("required_signals", [""])
             self.declare_parameter("timer_period", 0.1)
 
             self._timeout = float(self.get_parameter("freshness_timeout").value)

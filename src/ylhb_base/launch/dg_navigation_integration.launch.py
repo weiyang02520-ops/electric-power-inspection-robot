@@ -29,6 +29,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map")
     params_file = LaunchConfiguration("params_file")
     required_signals = LaunchConfiguration("required_signals")
+    cmd_vel_output_topic = LaunchConfiguration("cmd_vel_output_topic")
     enable_multisource_fusion = LaunchConfiguration("enable_multisource_fusion")
     gnss_origin_latitude = LaunchConfiguration("gnss_origin_latitude")
     gnss_origin_longitude = LaunchConfiguration("gnss_origin_longitude")
@@ -122,7 +123,7 @@ def generate_launch_description():
             {
                 "navigation_topic": "/cmd_vel_nav",
                 "recovery_topic": "/cmd_vel_recovery",
-                "output_topic": "/cmd_vel",
+                "output_topic": cmd_vel_output_topic,
                 "navigation_status_topic": "/dg/navigation/status",
             }
         ],
@@ -177,8 +178,17 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "required_signals",
-                default_value="[]",
+                # Keep the ROS string-array parameter non-empty at launch
+                # evaluation time; the node filters the blank sentinel.
+                default_value="['']",
                 description="Optional required health signals, for example ['lidar']",
+            ),
+            DeclareLaunchArgument(
+                "cmd_vel_output_topic",
+                default_value="/cmd_vel",
+                description=(
+                    "Final arbiter output; use /dg/test_cmd_vel for offline tests"
+                ),
             ),
             GroupAction([SetRemap(src="/cmd_vel", dst="/cmd_vel_nav"), nav2_launch], condition=IfCondition(enable_nav2)),
             lidar,

@@ -231,7 +231,9 @@ def create_node(node_name: str) -> Any:
                 "lidar_quality_topic": "/dg/lidar/quality",
                 "gnss_quality_topic": "/dg/gnss/quality",
                 "match_quality_topic": "/dg/relocalization/match_quality",
-                "required_signals": [],
+                # Declare this as a ROS string array; an empty Python list is
+                # inferred as BYTE_ARRAY by rclpy on Humble.
+                "required_signals": [""],
                 "seed_topic": "/dg/relocalization/seed",
                 "seed_frame_id": "map",
                 "manual_topic": "/dg/relocalization/manual_takeover",
