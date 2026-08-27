@@ -7,7 +7,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from cmd_vel_arbiter_core import ArbiterConfig, ArbiterInput, CmdVelArbiter, TwistCommand  # noqa: E402
+from cmd_vel_arbiter_core import ArbiterConfig, ArbiterInput as _ArbiterInput, CmdVelArbiter, TwistCommand  # noqa: E402
 from navigation_health_core import NavigationHealthAggregator, NavigationHealthInput  # noqa: E402
 
 
@@ -32,6 +32,13 @@ def health(**changes: object) -> NavigationHealthInput:
 
 NAV_COMMAND = TwistCommand(0.3, 0.0)
 RECOVERY_COMMAND = TwistCommand(0.0, 0.15)
+
+
+def ArbiterInput(*args: object, **kwargs: object) -> _ArbiterInput:
+    """Keep legacy test fixtures explicit about a fresh health status."""
+    if "navigation_status_received_at" not in kwargs:
+        kwargs["navigation_status_received_at"] = args[0] if args else kwargs.get("now")
+    return _ArbiterInput(*args, **kwargs)
 
 
 class NavigationIntegrationCoreTests(unittest.TestCase):
@@ -131,6 +138,40 @@ class NavigationIntegrationCoreTests(unittest.TestCase):
         self.assertEqual(aggregator.evaluate(health(relocalization_state="ACTIVE_SCAN")).overall_state, "RECOVERING")
         self.assertEqual(aggregator.evaluate(health(relocalization_state="VERIFYING")).overall_state, "RECOVERING")
         self.assertEqual(aggregator.evaluate(health(relocalization_state="RECOVERED")).overall_state, "RECOVERED")
+
+    def test_localization_suspect_is_zero_at_integration_boundary(self) -> None:
+        output = CmdVelArbiter(ArbiterConfig(switch_guard_duration=0.0)).process(
+            ArbiterInput(0.0, NAV_COMMAND, 0.0, navigation_state="LOCALIZATION_SUSPECT")
+        )
+        self.assertEqual(output.command, TwistCommand())
+
+    def test_unknown_health_state_is_zero_at_integration_boundary(self) -> None:
+        output = CmdVelArbiter(ArbiterConfig(switch_guard_duration=0.0)).process(
+            ArbiterInput(0.0, NAV_COMMAND, 0.0, navigation_state="UNKNOWN")
+        )
+        self.assertEqual(output.command, TwistCommand())
+
+    def test_stale_health_status_cannot_forward_a_new_navigation_command(self) -> None:
+        output = CmdVelArbiter().process(
+            ArbiterInput(
+                now=2.0,
+                navigation_command=NAV_COMMAND,
+                navigation_received_at=2.0,
+                navigation_state="NOMINAL",
+                navigation_status_received_at=0.0,
+            )
+        )
+        self.assertEqual(output.command, TwistCommand())
+
+    def test_stale_relocalization_becomes_suspect_before_arbiter(self) -> None:
+        output = NavigationHealthAggregator().evaluate(
+            health(relocalization_state="RECOVERED", relocalization_fresh=False)
+        )
+        self.assertEqual(output.overall_state, "LOCALIZATION_SUSPECT")
+        arbiter_output = CmdVelArbiter(ArbiterConfig(switch_guard_duration=0.0)).process(
+            ArbiterInput(0.0, NAV_COMMAND, 0.0, navigation_state=output.overall_state)
+        )
+        self.assertEqual(arbiter_output.command, TwistCommand())
 
 
 if __name__ == "__main__":

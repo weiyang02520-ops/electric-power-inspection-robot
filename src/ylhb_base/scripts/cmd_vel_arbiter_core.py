@@ -22,6 +22,7 @@ class TwistCommand:
 class ArbiterConfig:
     source_timeout: float = 0.5
     switch_guard_duration: float = 0.2
+    status_timeout: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class ArbiterInput:
     recovery_received_at: float | None = None
     navigation_state: str = "NOMINAL"
     manual_takeover: bool = False
+    navigation_status_received_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,11 @@ class CmdVelArbiter:
 
     def __init__(self, config: ArbiterConfig | None = None) -> None:
         self.config = config or ArbiterConfig()
-        if self.config.source_timeout < 0.0 or self.config.switch_guard_duration < 0.0:
+        if (
+            self.config.source_timeout < 0.0
+            or self.config.switch_guard_duration < 0.0
+            or self.config.status_timeout < 0.0
+        ):
             raise ValueError("arbiter durations must be non-negative")
         self._source = NONE
         self._guard_until = 0.0
@@ -66,13 +72,16 @@ class CmdVelArbiter:
         if event.manual_takeover:
             self._source = NONE
             return self._zero(event, "MANUAL_TAKEOVER")
+        if not _fresh(event.navigation_status_received_at, event.now, self.config.status_timeout):
+            self._source = NONE
+            return self._zero(event, "NAVIGATION_STATUS_STALE")
         state = str(event.navigation_state or "DEGRADED").upper()
         nav_fresh = _fresh(event.navigation_received_at, event.now, self.config.source_timeout)
         recovery_fresh = _fresh(event.recovery_received_at, event.now, self.config.source_timeout)
         nav_ok = nav_fresh and _finite_command(event.navigation_command)
         recovery_ok = recovery_fresh and _finite_command(event.recovery_command)
 
-        if state in {"FAILED", "MANUAL_REQUIRED"}:
+        if state in {"FAILED", "MANUAL_REQUIRED", "LOCALIZATION_SUSPECT"}:
             self._source = NONE
             return self._zero(event, f"STATE_{state}")
         if state == "RECOVERING":
@@ -81,12 +90,15 @@ class CmdVelArbiter:
                 return self._zero(event, "RECOVERY_SOURCE_STALE")
             selected = RECOVERY
             command = event.recovery_command
-        else:
+        elif state in {"NOMINAL", "DEGRADED", "RECOVERED"}:
             if not nav_ok:
                 self._source = NONE
                 return self._zero(event, "NAV_SOURCE_STALE")
             selected = NAV
             command = event.navigation_command
+        else:
+            self._source = NONE
+            return self._zero(event, "UNKNOWN_NAVIGATION_STATE")
 
         if selected != self._source:
             self._source = selected

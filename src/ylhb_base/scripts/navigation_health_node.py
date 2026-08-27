@@ -71,14 +71,17 @@ def create_node(node_name: str) -> Any:
             self.declare_parameter("status_topic", "/dg/navigation/status")
             self.declare_parameter("freshness_timeout", 1.0)
             self.declare_parameter("max_amcl_covariance", 0.5)
+            self.declare_parameter("min_lidar_quality", 0.2)
             self.declare_parameter("required_signals", [])
             self.declare_parameter("timer_period", 0.1)
 
             self._timeout = float(self.get_parameter("freshness_timeout").value)
+            self._min_lidar_quality = float(self.get_parameter("min_lidar_quality").value)
             self._required_signals = _parse_required_signals(self.get_parameter("required_signals").value)
             self._aggregator = NavigationHealthAggregator(
                 max_amcl_covariance=float(self.get_parameter("max_amcl_covariance").value),
                 freshness_timeout=self._timeout,
+                min_lidar_quality=self._min_lidar_quality,
             )
             self._now_value = self._now()
             self._gnss_state: str | None = None
@@ -151,7 +154,13 @@ def create_node(node_name: str) -> Any:
             received_at = self._now()
             values = {str(item.key): str(item.value) for item in selected.values}
             observation = parse_signal_diagnostic(
-                signal, values, int(selected.level), received_at, received_at, self._timeout
+                signal,
+                values,
+                int(selected.level),
+                received_at,
+                received_at,
+                self._timeout,
+                self._min_lidar_quality,
             )
             if signal == "lidar":
                 self._lidar_state, self._lidar_received_at = observation.state, received_at
@@ -197,6 +206,7 @@ def create_node(node_name: str) -> Any:
                     scan_match_state=self._scan_match_state,
                     scan_match_fresh=self._fresh(self._scan_match_received_at, now),
                     relocalization_state=self._relocalization_state,
+                    relocalization_fresh=self._fresh(self._relocalization_received_at, now),
                     required_signals=self._required_signals,
                 )
             )

@@ -37,11 +37,13 @@ def create_node(node_name: str) -> Any:
             self.declare_parameter("manual_topic", "/dg/relocalization/manual_takeover")
             self.declare_parameter("source_timeout", 0.5)
             self.declare_parameter("switch_guard_duration", 0.2)
+            self.declare_parameter("status_timeout", 1.0)
             self.declare_parameter("timer_period", 0.05)
             self._arbiter = CmdVelArbiter(
                 ArbiterConfig(
                     source_timeout=float(self.get_parameter("source_timeout").value),
                     switch_guard_duration=float(self.get_parameter("switch_guard_duration").value),
+                    status_timeout=float(self.get_parameter("status_timeout").value),
                 )
             )
             self._now_value = self._now()
@@ -50,6 +52,7 @@ def create_node(node_name: str) -> Any:
             self._recovery_cmd: TwistCommand | None = None
             self._recovery_received_at: float | None = None
             self._navigation_state = "DEGRADED"
+            self._navigation_status_received_at: float | None = None
             self._manual_takeover = False
             self._output_pub = self.create_publisher(
                 Twist, str(self.get_parameter("output_topic").value), 10
@@ -95,6 +98,7 @@ def create_node(node_name: str) -> Any:
                 return
             values = {str(item.key): str(item.value) for item in selected.values}
             self._navigation_state = values.get("overall_state") or str(selected.message) or "DEGRADED"
+            self._navigation_status_received_at = self._now()
 
         def _on_manual(self, message: Any) -> None:
             self._manual_takeover = bool(message.data)
@@ -113,6 +117,7 @@ def create_node(node_name: str) -> Any:
                     recovery_received_at=self._recovery_received_at,
                     navigation_state=self._navigation_state,
                     manual_takeover=self._manual_takeover,
+                    navigation_status_received_at=self._navigation_status_received_at,
                 )
             )
             message = Twist()

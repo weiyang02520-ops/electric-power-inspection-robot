@@ -55,6 +55,9 @@ class NavigationProtocolAndLaunchTests(unittest.TestCase):
         text = LAUNCH.read_text(encoding="utf-8")
         self.assertIn('DeclareLaunchArgument("enable_nav2", default_value="false"', text)
         self.assertIn('SetRemap(src="/cmd_vel", dst="/cmd_vel_nav")', text)
+        self.assertIn('default_map = preferred_map if os.path.exists(preferred_map) else fallback_map', text)
+        self.assertIn('DeclareLaunchArgument("map", default_value=default_map)', text)
+        self.assertNotIn('DeclareLaunchArgument("map", default_value="")', text)
 
     def test_cmake_installs_new_wrappers_and_registers_tests(self) -> None:
         text = CMAKE.read_text(encoding="utf-8")
@@ -92,7 +95,7 @@ class NavigationProtocolAndLaunchTests(unittest.TestCase):
         scan_map = (SCRIPTS / "scan_map_relocalization_node.py").read_text(encoding="utf-8")
         active = (SCRIPTS / "active_relocalization_node.py").read_text(encoding="utf-8")
         health = (SCRIPTS / "navigation_health_node.py").read_text(encoding="utf-8")
-        for field in ("valid_ratio", "temporal_status"):
+        for field in ("valid_ratio", "geometry_score", "temporal_status"):
             self.assertIn(field, lidar)
         for field in ("current_state", "decision"):
             self.assertIn(field, gnss)
@@ -100,8 +103,18 @@ class NavigationProtocolAndLaunchTests(unittest.TestCase):
             self.assertIn(field, scan_map)
         for field in ("state", "attempt_id", "request_candidate", "seed_source"):
             self.assertIn(field, active)
-        for field in ("gnss_state", "lidar_state", "amcl_state", "scan_match_state", "overall_state", "reasons", "timestamp"):
+        for field in ("gnss_state", "lidar_state", "amcl_state", "scan_match_state", "relocalization_state", "overall_state", "reasons", "timestamp"):
             self.assertIn(field, health)
+
+    def test_health_and_arbiter_have_freshness_guards(self) -> None:
+        health = (SCRIPTS / "navigation_health_node.py").read_text(encoding="utf-8")
+        arbiter = (SCRIPTS / "cmd_vel_arbiter_node.py").read_text(encoding="utf-8")
+        core = (SCRIPTS / "cmd_vel_arbiter_core.py").read_text(encoding="utf-8")
+        self.assertIn('"min_lidar_quality", 0.2', health)
+        self.assertIn("relocalization_fresh", health)
+        self.assertIn('"status_timeout", 1.0', arbiter)
+        self.assertIn("navigation_status_received_at", arbiter)
+        self.assertIn("NAVIGATION_STATUS_STALE", core)
 
 
 if __name__ == "__main__":

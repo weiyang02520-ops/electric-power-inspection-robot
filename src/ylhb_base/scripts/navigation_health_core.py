@@ -52,6 +52,7 @@ class NavigationHealthInput:
     scan_match_state: str | None = None
     scan_match_fresh: bool | None = None
     relocalization_state: str | None = None
+    relocalization_fresh: bool | None = None
     required_signals: tuple[str, ...] = ()
 
 
@@ -101,6 +102,7 @@ def parse_signal_diagnostic(
     now: float,
     received_at: float | None,
     timeout: float,
+    min_lidar_quality: float = 0.2,
 ) -> SignalObservation:
     """Map the fields emitted by existing POCs into one signal contract."""
     fresh = None if received_at is None else now - received_at <= timeout
@@ -110,14 +112,25 @@ def parse_signal_diagnostic(
         raw = upper_values.get("current_state") or upper_values.get("decision")
         state = normalize_signal_state(raw, fresh)
     elif signal == "lidar":
-        raw = upper_values.get("state") or upper_values.get("temporal_status")
-        state = normalize_signal_state(raw, fresh)
-        valid_ratio = upper_values.get("valid_ratio")
-        if state == GOOD and valid_ratio is not None and _finite(valid_ratio) and float(valid_ratio) <= 0.0:
+        if fresh is False:
+            state = STALE
+        elif level >= 2:
             state = REJECTED
-            reasons.append("LIDAR_NO_VALID_POINTS")
-        elif state == UNKNOWN and valid_ratio is not None and _finite(valid_ratio):
-            state = GOOD if float(valid_ratio) > 0.0 else REJECTED
+            reasons.append("LIDAR_DIAGNOSTIC_ERROR")
+        else:
+            valid_ratio = upper_values.get("valid_ratio")
+            geometry_score = upper_values.get("geometry_score")
+            if valid_ratio is None or not _finite(valid_ratio) or float(valid_ratio) <= 0.0:
+                state = REJECTED
+                reasons.append("LIDAR_NO_VALID_POINTS")
+            elif geometry_score is None or not _finite(geometry_score):
+                state = REJECTED
+                reasons.append("LIDAR_GEOMETRY_SCORE_MISSING")
+            elif float(geometry_score) < min_lidar_quality:
+                state = DEGRADED
+                reasons.append("LIDAR_GEOMETRY_DEGRADED")
+            else:
+                state = GOOD
     elif signal == "scan_match":
         accepted = upper_values.get("accepted", "").lower()
         if accepted in {"false", "0", "no"}:
@@ -142,9 +155,17 @@ def parse_signal_diagnostic(
 class NavigationHealthAggregator:
     """Aggregate observations; it never commands motion or triggers recovery."""
 
-    def __init__(self, max_amcl_covariance: float = 0.5, freshness_timeout: float = 1.0) -> None:
+    def __init__(
+        self,
+        max_amcl_covariance: float = 0.5,
+        freshness_timeout: float = 1.0,
+        min_lidar_quality: float = 0.2,
+    ) -> None:
         self.max_amcl_covariance = max_amcl_covariance
         self.freshness_timeout = freshness_timeout
+        if min_lidar_quality < 0.0:
+            raise ValueError("min_lidar_quality must be non-negative")
+        self.min_lidar_quality = min_lidar_quality
         self._last_overall_state: str | None = None
 
     def evaluate(self, event: NavigationHealthInput) -> NavigationHealthOutput:
@@ -152,7 +173,11 @@ class NavigationHealthAggregator:
         lidar = normalize_signal_state(event.lidar_state, event.lidar_fresh)
         scan_match = normalize_signal_state(event.scan_match_state, event.scan_match_fresh)
         amcl = self._amcl_state(event)
-        relocalization = self._relocalization_state(event.relocalization_state)
+        relocalization = (
+            STALE
+            if event.relocalization_fresh is False
+            else self._relocalization_state(event.relocalization_state)
+        )
         reasons: list[str] = []
         required = set(event.required_signals)
         for name, state in (("GNSS", gnss), ("LIDAR", lidar), ("SCAN_MATCH", scan_match)):
@@ -168,6 +193,8 @@ class NavigationHealthAggregator:
             reasons.append("SCAN_STALE")
         if event.amcl_fresh is False and "AMCL_STALE" not in reasons:
             reasons.append("AMCL_STALE")
+        if relocalization == STALE:
+            reasons.append("RELOCALIZATION_STALE")
 
         if relocalization == MANUAL_REQUIRED:
             overall = MANUAL_REQUIRED
@@ -177,6 +204,7 @@ class NavigationHealthAggregator:
             overall = RECOVERING
         elif (
             relocalization == LOCALIZATION_SUSPECT
+            or relocalization == STALE
             or amcl in {REJECTED, STALE}
             or any(state == STALE and name.lower() in required for name, state in (("GNSS", gnss), ("LIDAR", lidar), ("SCAN_MATCH", scan_match)))
         ):

@@ -19,6 +19,10 @@ from launch_ros.actions import Node, SetRemap
 
 def generate_launch_description():
     package_share = get_package_share_directory("ylhb_base")
+    workspace_dir = os.environ.get("WS_DIR", os.path.expanduser("~/ros2_DL"))
+    preferred_map = os.path.join(workspace_dir, "maps", "my_map.yaml")
+    fallback_map = os.path.join(workspace_dir, "src", "my_map.yaml")
+    default_map = preferred_map if os.path.exists(preferred_map) else fallback_map
     enable_nav2 = LaunchConfiguration("enable_nav2")
     use_sim_time = LaunchConfiguration("use_sim_time")
     map_file = LaunchConfiguration("map")
@@ -120,7 +124,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("enable_nav2", default_value="false", description="Start existing Nav2 launch"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("map", default_value=""),
+            DeclareLaunchArgument("map", default_value=default_map),
             DeclareLaunchArgument(
                 "params_file",
                 default_value=os.path.join(package_share, "config", "nav2_params.yaml"),

@@ -124,11 +124,64 @@ class NavigationHealthCoreTests(unittest.TestCase):
         self.assertEqual(observation.state, GOOD)
         self.assertTrue(observation.fresh)
 
-    def test_existing_lidar_diagnostic_mapping_uses_valid_ratio(self) -> None:
+    def test_lidar_diagnostic_mapping_uses_geometry_score(self) -> None:
         observation = parse_signal_diagnostic(
-            "lidar", {"temporal_status": "NO_PREVIOUS", "valid_ratio": "0.9"}, 0, 1.0, 0.5, 1.0
+            "lidar",
+            {"temporal_status": "COMPARED", "valid_ratio": "0.9", "geometry_score": "0.8"},
+            0,
+            1.0,
+            0.5,
+            1.0,
         )
         self.assertEqual(observation.state, GOOD)
+
+    def test_lidar_low_geometry_score_is_degraded(self) -> None:
+        observation = parse_signal_diagnostic(
+            "lidar",
+            {"temporal_status": "COMPARED", "valid_ratio": "0.9", "geometry_score": "0.05"},
+            0,
+            1.0,
+            0.5,
+            1.0,
+            0.2,
+        )
+        self.assertEqual(observation.state, DEGRADED)
+
+    def test_lidar_zero_valid_ratio_is_rejected(self) -> None:
+        observation = parse_signal_diagnostic(
+            "lidar",
+            {"temporal_status": "COMPARED", "valid_ratio": "0", "geometry_score": "0.8"},
+            0,
+            1.0,
+            0.5,
+            1.0,
+        )
+        self.assertEqual(observation.state, REJECTED)
+
+    def test_lidar_diagnostic_error_is_rejected(self) -> None:
+        observation = parse_signal_diagnostic(
+            "lidar",
+            {"temporal_status": "COMPARED", "valid_ratio": "0.9", "geometry_score": "0.8"},
+            2,
+            1.0,
+            0.5,
+            1.0,
+        )
+        self.assertEqual(observation.state, REJECTED)
+
+    def test_stale_relocalization_is_localization_suspect(self) -> None:
+        output = NavigationHealthAggregator().evaluate(
+            event(relocalization_state="RECOVERING", relocalization_fresh=False)
+        )
+        self.assertEqual(output.relocalization_state, STALE)
+        self.assertEqual(output.overall_state, LOCALIZATION_SUSPECT)
+        self.assertIn("RELOCALIZATION_STALE", output.reasons)
+
+    def test_missing_relocalization_at_start_has_no_stale_claim(self) -> None:
+        output = NavigationHealthAggregator().evaluate(
+            event(relocalization_state=None, relocalization_fresh=None)
+        )
+        self.assertEqual(output.overall_state, NOMINAL)
 
     def test_rejected_scan_match_diagnostic_is_rejected(self) -> None:
         observation = parse_signal_diagnostic(
