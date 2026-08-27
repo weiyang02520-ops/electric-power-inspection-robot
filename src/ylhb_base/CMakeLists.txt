@@ -114,6 +114,8 @@ install(PROGRAMS
   scripts/navigation_health_node.py
   scripts/cmd_vel_arbiter_core.py
   scripts/cmd_vel_arbiter_node.py
+  scripts/multisource_fusion_core.py
+  scripts/multisource_fusion_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -178,6 +180,8 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_cmd_vel_arbiter_core test/test_cmd_vel_arbiter_core.py)
   ament_add_pytest_test(test_navigation_integration_core test/test_navigation_integration_core.py)
   ament_add_pytest_test(test_navigation_protocols test/test_navigation_protocols.py)
+  ament_add_pytest_test(test_multisource_fusion_core test/test_multisource_fusion_core.py)
+  ament_add_pytest_test(test_multisource_fusion_protocols test/test_multisource_fusion_protocols.py)
 endif()
 
 ament_package()

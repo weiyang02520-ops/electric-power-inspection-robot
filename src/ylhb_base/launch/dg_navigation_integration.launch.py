@@ -28,6 +28,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map")
     params_file = LaunchConfiguration("params_file")
     required_signals = LaunchConfiguration("required_signals")
+    enable_multisource_fusion = LaunchConfiguration("enable_multisource_fusion")
 
     nav2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(package_share, "launch", "navigation.launch.py")),
@@ -119,10 +120,36 @@ def generate_launch_description():
             }
         ],
     )
+    multisource_fusion = Node(
+        package="ylhb_base",
+        executable="multisource_fusion_node",
+        name="dg_multisource_fusion_node",
+        output="screen",
+        condition=IfCondition(enable_multisource_fusion),
+        parameters=[
+            {
+                "local_odom_topic": "/odom",
+                "gnss_fix_topic": "/dg/gnss/accepted_fix",
+                "gnss_quality_topic": "/dg/gnss/quality",
+                "amcl_pose_topic": "/amcl_pose",
+                "scan_match_pose_topic": "/scan_match_pose",
+                "match_quality_topic": "/dg/relocalization/match_quality",
+                "fusion_odom_topic": "/dg/fusion/odom",
+                "fusion_pose_topic": "/dg/fusion/pose",
+                "fusion_status_topic": "/dg/fusion/status",
+                "publish_tf": False,
+            }
+        ],
+    )
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("enable_nav2", default_value="false", description="Start existing Nav2 launch"),
+            DeclareLaunchArgument(
+                "enable_multisource_fusion",
+                default_value="true",
+                description="Start the DG side-channel multi-source fusion POC",
+            ),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("map", default_value=default_map),
             DeclareLaunchArgument(
@@ -141,5 +168,6 @@ def generate_launch_description():
             relocalization,
             health,
             arbiter,
+            multisource_fusion,
         ]
     )
