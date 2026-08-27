@@ -26,6 +26,11 @@ class MultisourceFusionProtocolTests(unittest.TestCase):
             "REJECTED_UPDATE",
             "WAITING_ALIGNMENT",
             "position_uncertainty",
+            "compute_gnss_confidence",
+            "compute_lidar_confidence",
+            "measurement_confidence",
+            "adaptive_position_uncertainty",
+            "adaptive_yaw_uncertainty",
         ):
             self.assertIn(value, text)
 
@@ -35,6 +40,7 @@ class MultisourceFusionProtocolTests(unittest.TestCase):
             '"/odom"',
             '"/dg/gnss/accepted_fix"',
             '"/dg/gnss/quality"',
+            '"/dg/lidar/quality"',
             '"/amcl_pose"',
             '"/scan_match_pose"',
             '"/dg/relocalization/match_quality"',

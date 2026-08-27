@@ -10,6 +10,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from multisource_fusion_core import (  # noqa: E402
     DEAD_RECKONING,
+    DEGRADED_QUALITY,
     GNSS_AIDED,
     GOOD,
     LIDAR_AIDED,
@@ -25,6 +26,8 @@ from multisource_fusion_core import (  # noqa: E402
     MapPoseMeasurement,
     MultisourceFusionCore,
     Pose2D,
+    compute_gnss_confidence,
+    compute_lidar_confidence,
     estimate_alignment,
     geodetic_to_ecef,
     geodetic_to_enu,
@@ -45,8 +48,22 @@ def gnss(
     state: str = GOOD,
     fresh: bool = True,
     accepted: bool = True,
+    hdop: float | None = None,
+    satellites: float | None = None,
+    differential_age: float | None = None,
 ) -> GnssPosition:
-    return GnssPosition(latitude, longitude, 10.0, timestamp, state, fresh, accepted)
+    return GnssPosition(
+        latitude,
+        longitude,
+        10.0,
+        timestamp,
+        state,
+        fresh,
+        accepted,
+        hdop,
+        satellites,
+        differential_age,
+    )
 
 
 def lidar(
@@ -58,8 +75,27 @@ def lidar(
     fresh: bool = True,
     accepted: bool = True,
     source: str = "amcl",
+    geometry_score: float | None = None,
+    temporal_match_ratio: float | None = None,
+    covariance: float | None = None,
+    match_score: float | None = None,
+    inlier_ratio: float | None = None,
+    mean_distance: float | None = None,
 ) -> MapPoseMeasurement:
-    return MapPoseMeasurement(odom(x, y, yaw, timestamp), timestamp, state, fresh, accepted, source)
+    return MapPoseMeasurement(
+        odom(x, y, yaw, timestamp),
+        timestamp,
+        state,
+        fresh,
+        accepted,
+        source,
+        geometry_score,
+        temporal_match_ratio,
+        covariance,
+        match_score,
+        inlier_ratio,
+        mean_distance,
+    )
 
 
 def core(**changes: object) -> MultisourceFusionCore:
@@ -112,6 +148,100 @@ class GeodeticAndAlignmentTests(unittest.TestCase):
                 ]
             )
         )
+
+
+class AdaptiveWeightingTests(unittest.TestCase):
+    def test_gnss_confidence_uses_state_and_quality_metrics(self) -> None:
+        good = gnss(hdop=1.0, satellites=12.0, differential_age=0.2)
+        degraded = gnss(
+            state=DEGRADED_QUALITY,
+            hdop=8.0,
+            satellites=3.0,
+            differential_age=10.0,
+        )
+        self.assertGreater(compute_gnss_confidence(good), compute_gnss_confidence(degraded))
+        self.assertGreater(compute_gnss_confidence(good), 0.9)
+        self.assertLess(compute_gnss_confidence(degraded), 0.4)
+        self.assertGreaterEqual(compute_gnss_confidence(degraded), 0.0)
+        self.assertLessEqual(compute_gnss_confidence(good), 1.0)
+
+    def test_lidar_confidence_uses_geometry_and_temporal_quality(self) -> None:
+        good = lidar(
+            1.0,
+            geometry_score=0.95,
+            temporal_match_ratio=0.98,
+            covariance=0.05,
+            match_score=0.9,
+            inlier_ratio=0.95,
+            mean_distance=0.05,
+        )
+        degraded = lidar(
+            1.0,
+            geometry_score=0.1,
+            temporal_match_ratio=0.2,
+            covariance=0.45,
+            match_score=0.2,
+            inlier_ratio=0.25,
+            mean_distance=1.0,
+        )
+        self.assertGreater(compute_lidar_confidence(good), compute_lidar_confidence(degraded))
+        self.assertGreaterEqual(compute_lidar_confidence(degraded), 0.0)
+        self.assertLessEqual(compute_lidar_confidence(good), 1.0)
+
+    def test_low_confidence_gnss_is_downweighted_and_reports_uncertainty(self) -> None:
+        high = core()
+        low = core()
+        for fusion in (high, low):
+            fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+            fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), gnss=gnss(timestamp=1.0)))
+        high_output = high.process(
+            FusionInput(
+                2.0,
+                local_odom=odom(0.0, timestamp=2.0),
+                gnss=gnss(longitude=120.00001, timestamp=2.0, hdop=1.0, satellites=12.0, differential_age=0.2),
+            )
+        )
+        low_output = low.process(
+            FusionInput(
+                2.0,
+                local_odom=odom(0.0, timestamp=2.0),
+                gnss=gnss(longitude=120.00001, timestamp=2.0, hdop=8.0, satellites=3.0, differential_age=10.0),
+            )
+        )
+        self.assertGreater(high_output.map_pose.x, low_output.map_pose.x)  # type: ignore[union-attr]
+        self.assertGreater(high_output.measurement_confidence, low_output.measurement_confidence)
+        self.assertGreater(low_output.adaptive_position_uncertainty, high_output.adaptive_position_uncertainty)
+
+    def test_concurrent_degradation_remains_finite_with_adaptive_weights(self) -> None:
+        fusion = core()
+        fusion.process(FusionInput(0.0, local_odom=odom(0.0, timestamp=0.0)))
+        fusion.process(FusionInput(1.0, local_odom=odom(0.0, timestamp=1.0), amcl_pose=lidar(0.0, timestamp=1.0)))
+        output = fusion.process(
+            FusionInput(
+                2.0,
+                local_odom=odom(0.0, timestamp=2.0),
+                gnss=gnss(
+                    longitude=120.00001,
+                    timestamp=2.0,
+                    state=DEGRADED_QUALITY,
+                    hdop=8.0,
+                    satellites=3.0,
+                    differential_age=10.0,
+                ),
+                scan_match_pose=lidar(
+                    0.5,
+                    timestamp=2.0,
+                    source="scan_match",
+                    geometry_score=0.1,
+                    temporal_match_ratio=0.2,
+                    inlier_ratio=0.2,
+                ),
+            )
+        )
+        self.assertTrue(output.updated)
+        self.assertLess(output.measurement_confidence, 1.0)
+        self.assertTrue(math.isfinite(output.adaptive_position_uncertainty))
+        self.assertTrue(math.isfinite(output.adaptive_yaw_uncertainty))
 
 
 class FusionCoreTests(unittest.TestCase):

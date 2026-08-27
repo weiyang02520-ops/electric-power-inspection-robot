@@ -46,6 +46,10 @@ def wrap_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(upper, value))
+
+
 def _finite_pose(pose: "Pose2D | None") -> bool:
     return pose is not None and all(_finite(value) for value in (pose.x, pose.y, pose.yaw, pose.timestamp))
 
@@ -172,6 +176,9 @@ class GnssPosition:
     state: str = GOOD
     fresh: bool = True
     accepted: bool = True
+    hdop: float | None = None
+    satellites: float | None = None
+    differential_age: float | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,12 @@ class MapPoseMeasurement:
     fresh: bool = True
     accepted: bool = True
     source: str = "amcl"
+    geometry_score: float | None = None
+    temporal_match_ratio: float | None = None
+    covariance: float | None = None
+    match_score: float | None = None
+    inlier_ratio: float | None = None
+    mean_distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +225,16 @@ class FusionConfig:
     odom_yaw_noise_per_s: float = math.radians(0.1)
     min_position_uncertainty: float = 0.05
     min_yaw_uncertainty: float = math.radians(1.0)
+    gnss_good_hdop: float = 1.5
+    gnss_degraded_hdop: float = 3.0
+    gnss_good_satellites: float = 8.0
+    gnss_degraded_satellites: float = 4.0
+    gnss_max_differential_age: float = 3.0
+    amcl_max_covariance: float = 0.5
+    adaptive_min_confidence: float = 0.1
+    gnss_base_position_sigma: float = 1.0
+    lidar_base_position_sigma: float = 0.5
+    lidar_base_yaw_sigma: float = math.radians(10.0)
 
 
 @dataclass(frozen=True)
@@ -226,6 +249,66 @@ class FusionOutput:
     reasons: tuple[str, ...]
     timestamp: float
     global_anchored: bool
+    measurement_confidence: float
+    adaptive_position_uncertainty: float
+    adaptive_yaw_uncertainty: float
+
+
+def _threshold_quality(
+    value: float | None,
+    good: float,
+    degraded: float,
+    higher_is_better: bool = False,
+) -> float | None:
+    if value is None or not _finite(value):
+        return None
+    if higher_is_better:
+        if good <= degraded:
+            return 1.0 if value >= good else 0.25
+        return 1.0 if value >= good else 0.25 if value <= degraded else 0.25 + 0.75 * ((value - degraded) / (good - degraded))
+    if degraded <= good:
+        return 1.0 if value <= good else 0.25
+    return 1.0 if value <= good else 0.25 if value >= degraded else 1.0 - 0.75 * ((value - good) / (degraded - good))
+
+
+def compute_gnss_confidence(measurement: GnssPosition, config: FusionConfig | None = None) -> float:
+    """Return a bounded confidence from the existing GNSS diagnostic fields."""
+    config = config or FusionConfig()
+    if not measurement.accepted or not measurement.fresh or measurement.state.upper() in {REJECTED, STALE}:
+        return 0.0
+    state_factor = 0.5 if measurement.state.upper() == DEGRADED_QUALITY else 1.0
+    scores = [
+        _threshold_quality(measurement.hdop, config.gnss_good_hdop, config.gnss_degraded_hdop),
+        _threshold_quality(
+            measurement.satellites,
+            config.gnss_good_satellites,
+            config.gnss_degraded_satellites,
+            higher_is_better=True,
+        ),
+    ]
+    if measurement.differential_age is not None and _finite(measurement.differential_age):
+        age = max(0.0, float(measurement.differential_age))
+        scores.append(1.0 if age <= config.gnss_max_differential_age else 0.25)
+    valid_scores = [score for score in scores if score is not None]
+    return _clamp(state_factor * (sum(valid_scores) / len(valid_scores) if valid_scores else 1.0))
+
+
+def compute_lidar_confidence(measurement: MapPoseMeasurement, config: FusionConfig | None = None) -> float:
+    """Return a bounded confidence from LiDAR/global-pose quality diagnostics."""
+    config = config or FusionConfig()
+    if not measurement.accepted or not measurement.fresh or measurement.state.upper() != GOOD:
+        return 0.0
+    scores: list[float] = []
+    for value in (measurement.geometry_score, measurement.temporal_match_ratio, measurement.inlier_ratio):
+        if value is not None and _finite(value):
+            scores.append(_clamp(float(value)))
+    if measurement.covariance is not None and _finite(measurement.covariance) and config.amcl_max_covariance > 0.0:
+        scores.append(_clamp(1.0 - float(measurement.covariance) / config.amcl_max_covariance, 0.25, 1.0))
+    if measurement.match_score is not None and _finite(measurement.match_score):
+        scores.append(_clamp(float(measurement.match_score)))
+    if measurement.mean_distance is not None and _finite(measurement.mean_distance):
+        scores.append(_clamp(math.exp(-max(0.0, float(measurement.mean_distance)))))
+    return _clamp(sum(scores) / len(scores) if scores else 1.0)
 
 
 def _compose(first: Pose2D, second: Pose2D, timestamp: float) -> Pose2D:
@@ -265,6 +348,9 @@ class MultisourceFusionCore:
         self._global_anchored = False
         self._position_uncertainty = self.config.initial_position_uncertainty
         self._yaw_uncertainty = self.config.initial_yaw_uncertainty
+        self._last_measurement_confidence = 0.0
+        self._adaptive_position_uncertainty = self.config.gnss_base_position_sigma
+        self._adaptive_yaw_uncertainty = self.config.lidar_base_yaw_sigma
         self._last_output: FusionOutput | None = None
 
     def _validate_config(self) -> None:
@@ -278,9 +364,21 @@ class MultisourceFusionCore:
             self.config.odom_yaw_noise_per_rad,
             self.config.odom_position_noise_per_s,
             self.config.odom_yaw_noise_per_s,
+            self.config.gnss_good_hdop,
+            self.config.gnss_degraded_hdop,
+            self.config.gnss_good_satellites,
+            self.config.gnss_degraded_satellites,
+            self.config.gnss_max_differential_age,
+            self.config.amcl_max_covariance,
+            self.config.adaptive_min_confidence,
+            self.config.gnss_base_position_sigma,
+            self.config.lidar_base_position_sigma,
+            self.config.lidar_base_yaw_sigma,
         )
         if any(value < 0.0 for value in nonnegative):
             raise ValueError("fusion limits and noise values must be non-negative")
+        if self.config.adaptive_min_confidence > 1.0:
+            raise ValueError("adaptive_min_confidence must not exceed 1.0")
 
     @property
     def alignment(self) -> Alignment2D | None:
@@ -338,34 +436,34 @@ class MultisourceFusionCore:
                     self.config.lidar_residual_gate,
                     event.now,
                     reasons,
-                    0.5,
+                    compute_lidar_confidence(lidar_update, self.config),
                     correct_yaw=True,
                 )
                 if updated:
                     accepted_source = lidar_source_name
             elif gnss_update is not None:
-                gnss_pose, uncertainty_factor = gnss_update
+                gnss_pose, confidence = gnss_update
                 updated = self._apply_absolute_update(
                     gnss_pose,
                     "GNSS",
                     self.config.gnss_residual_gate,
                     event.now,
                     reasons,
-                    uncertainty_factor,
+                    confidence,
                     correct_yaw=False,
                 )
                 if updated:
                     accepted_source = "GNSS"
         else:
             if gnss_update is not None:
-                gnss_pose, uncertainty_factor = gnss_update
+                gnss_pose, confidence = gnss_update
                 updated = self._apply_absolute_update(
                     gnss_pose,
                     "GNSS",
                     self.config.gnss_residual_gate,
                     event.now,
                     reasons,
-                    uncertainty_factor,
+                    confidence,
                     correct_yaw=False,
                 )
                 if updated:
@@ -378,7 +476,7 @@ class MultisourceFusionCore:
                     self.config.lidar_residual_gate,
                     event.now,
                     reasons,
-                    0.5,
+                    compute_lidar_confidence(lidar_update, self.config),
                     correct_yaw=True,
                 )
                 if lidar_applied:
@@ -466,8 +564,10 @@ class MultisourceFusionCore:
             self.config.gnss_reference,  # type: ignore[arg-type]
         )
         x, y = self._alignment.apply(enu)  # type: ignore[union-attr]
-        uncertainty_factor = 0.8 if gnss.state.upper() == DEGRADED_QUALITY else 0.5
-        return Pose2D(x, y, self._map_pose.yaw if self._map_pose is not None else 0.0, gnss.timestamp), uncertainty_factor
+        return (
+            Pose2D(x, y, self._map_pose.yaw if self._map_pose is not None else 0.0, gnss.timestamp),
+            compute_gnss_confidence(gnss, self.config),
+        )
 
     def _select_lidar_update(
         self, event: FusionInput, now: float, reasons: list[str]
@@ -501,7 +601,7 @@ class MultisourceFusionCore:
         residual_gate: float,
         now: float,
         reasons: list[str],
-        uncertainty_factor: float = 0.5,
+        measurement_confidence: float = 1.0,
         correct_yaw: bool = True,
     ) -> bool:
         if not _finite_pose(measurement) or self._map_pose is None:
@@ -519,6 +619,17 @@ class MultisourceFusionCore:
         if self._global_anchored and (math.hypot(dx, dy) > residual_gate or abs(dyaw) > self.config.yaw_residual_gate):
             reasons.append(f"{source}_OUTLIER")
             return False
+        confidence = _clamp(measurement_confidence)
+        effective_confidence = max(self.config.adaptive_min_confidence, confidence)
+        self._last_measurement_confidence = confidence
+        base_position_sigma = (
+            self.config.gnss_base_position_sigma
+            if source == "GNSS"
+            else self.config.lidar_base_position_sigma
+        )
+        self._adaptive_position_uncertainty = base_position_sigma / math.sqrt(effective_confidence)
+        if correct_yaw:
+            self._adaptive_yaw_uncertainty = self.config.lidar_base_yaw_sigma / math.sqrt(effective_confidence)
         if not self._global_anchored:
             self._map_pose = Pose2D(
                 measurement.x,
@@ -537,16 +648,19 @@ class MultisourceFusionCore:
                 dx = dy = 0.0
             if not correct_yaw:
                 dyaw = 0.0
+            dx *= effective_confidence
+            dy *= effective_confidence
+            dyaw *= effective_confidence
             dyaw = max(-self.config.max_yaw_correction_step, min(self.config.max_yaw_correction_step, dyaw))
             self._map_pose = Pose2D(self._map_pose.x + dx, self._map_pose.y + dy, wrap_angle(self._map_pose.yaw + dyaw), now)
         self._position_uncertainty = max(
             self.config.min_position_uncertainty,
-            self._position_uncertainty * uncertainty_factor,
+            self._position_uncertainty * (1.0 - 0.5 * effective_confidence),
         )
         if correct_yaw:
             self._yaw_uncertainty = max(
                 self.config.min_yaw_uncertainty,
-                self._yaw_uncertainty * uncertainty_factor,
+                self._yaw_uncertainty * (1.0 - 0.5 * effective_confidence),
             )
         self._last_absolute_timestamps[source] = measurement.timestamp
         self._last_absolute_update_time = now
@@ -574,4 +688,7 @@ class MultisourceFusionCore:
             reasons=tuple(dict.fromkeys(reasons)),
             timestamp=now,
             global_anchored=self._global_anchored,
+            measurement_confidence=self._last_measurement_confidence,
+            adaptive_position_uncertainty=self._adaptive_position_uncertainty,
+            adaptive_yaw_uncertainty=self._adaptive_yaw_uncertainty,
         )

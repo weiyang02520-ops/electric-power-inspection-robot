@@ -78,6 +78,7 @@ def create_node(node_name: str) -> Any:
             self.declare_parameter("local_odom_topic", "/odom")
             self.declare_parameter("gnss_fix_topic", "/dg/gnss/accepted_fix")
             self.declare_parameter("gnss_quality_topic", "/dg/gnss/quality")
+            self.declare_parameter("lidar_quality_topic", "/dg/lidar/quality")
             self.declare_parameter("amcl_pose_topic", "/amcl_pose")
             self.declare_parameter("scan_match_pose_topic", "/scan_match_pose")
             self.declare_parameter("match_quality_topic", "/dg/relocalization/match_quality")
@@ -137,17 +138,28 @@ def create_node(node_name: str) -> Any:
             self._gnss_state = "REJECTED"
             self._gnss_accepted = False
             self._gnss_quality_received_at: float | None = None
+            self._gnss_hdop: float | None = None
+            self._gnss_satellites: float | None = None
+            self._gnss_differential_age: float | None = None
+            self._lidar_geometry_score: float | None = None
+            self._lidar_temporal_match_ratio: float | None = None
+            self._lidar_state = "REJECTED"
+            self._lidar_quality_received_at: float | None = None
             self._amcl_pose: Pose2D | None = None
             self._amcl_received_at: float | None = None
             self._amcl_sequence = 0
             self._amcl_consumed_sequence = 0
             self._amcl_state = "REJECTED"
+            self._amcl_covariance: float | None = None
             self._scan_match_pose: Pose2D | None = None
             self._scan_match_received_at: float | None = None
             self._scan_match_sequence = 0
             self._scan_match_consumed_sequence = 0
             self._scan_match_state = "REJECTED"
             self._scan_match_accepted = False
+            self._scan_match_score: float | None = None
+            self._scan_match_inlier_ratio: float | None = None
+            self._scan_match_mean_distance: float | None = None
 
             self._odom_pub = self.create_publisher(
                 Odometry, str(self.get_parameter("fusion_odom_topic").value), 10
@@ -166,6 +178,9 @@ def create_node(node_name: str) -> Any:
             )
             self.create_subscription(
                 DiagnosticArray, str(self.get_parameter("gnss_quality_topic").value), self._on_gnss_quality, 10
+            )
+            self.create_subscription(
+                DiagnosticArray, str(self.get_parameter("lidar_quality_topic").value), self._on_lidar_quality, 10
             )
             self.create_subscription(
                 PoseWithCovarianceStamped, str(self.get_parameter("amcl_pose_topic").value), self._on_amcl, 10
@@ -217,7 +232,34 @@ def create_node(node_name: str) -> Any:
             self._gnss_state = _value(values, "current_state", _value(values, "decision", "REJECTED")).upper()
             self._gnss_accepted = _bool_value(_value(values, "accepted", "false"))
             self._gnss_quality_received_at = self._now()
+            self._gnss_hdop = self._float_value(values, "hdop")
+            self._gnss_satellites = self._float_value(values, "satellites")
+            self._gnss_differential_age = self._float_value(values, "differential_age")
             self._gnss_sequence += 1
+
+        @staticmethod
+        def _float_value(values: dict[str, str], key: str) -> float | None:
+            try:
+                value = float(values.get(key, "nan"))
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        def _on_lidar_quality(self, message: Any) -> None:
+            selected = self._status(message, "LIDAR")
+            if selected is None:
+                return
+            values = {str(item.key): str(item.value) for item in selected.values}
+            self._lidar_geometry_score = self._float_value(values, "geometry_score")
+            self._lidar_temporal_match_ratio = self._float_value(values, "temporal_match_ratio")
+            valid_ratio = self._float_value(values, "valid_ratio")
+            if int(selected.level) >= 2 or valid_ratio is not None and valid_ratio <= 0.0:
+                self._lidar_state = "REJECTED"
+            elif self._lidar_geometry_score is not None and self._lidar_geometry_score < 0.2:
+                self._lidar_state = "DEGRADED"
+            else:
+                self._lidar_state = "GOOD"
+            self._lidar_quality_received_at = self._now()
 
         def _on_amcl(self, message: Any) -> None:
             now = self._now()
@@ -225,10 +267,12 @@ def create_node(node_name: str) -> Any:
             if yaw is None:
                 self._amcl_pose = None
                 self._amcl_state = "REJECTED"
+                self._amcl_covariance = None
                 return
             covariance = float(message.pose.covariance[0])
             stamp = _stamp_to_seconds(message.header.stamp) or now
             self._amcl_pose = Pose2D(float(message.pose.pose.position.x), float(message.pose.pose.position.y), yaw, stamp)
+            self._amcl_covariance = covariance if math.isfinite(covariance) else None
             self._amcl_state = "GOOD" if math.isfinite(covariance) and covariance <= self._max_amcl_covariance else "REJECTED"
             self._amcl_received_at = now
             self._amcl_sequence += 1
@@ -251,6 +295,9 @@ def create_node(node_name: str) -> Any:
             values = {str(item.key): str(item.value) for item in selected.values}
             self._scan_match_accepted = _bool_value(_value(values, "accepted", "false"))
             self._scan_match_state = "GOOD" if self._scan_match_accepted and int(selected.level) < 2 else "REJECTED"
+            self._scan_match_score = self._float_value(values, "score")
+            self._scan_match_inlier_ratio = self._float_value(values, "inlier_ratio")
+            self._scan_match_mean_distance = self._float_value(values, "mean_distance")
             self._scan_match_received_at = self._now()
             self._scan_match_sequence += 1
 
@@ -268,6 +315,9 @@ def create_node(node_name: str) -> Any:
                 state=self._gnss_state,
                 fresh=bool(quality_fresh and fix_fresh),
                 accepted=bool(self._gnss_accepted),
+                hdop=self._gnss_hdop,
+                satellites=self._gnss_satellites,
+                differential_age=self._gnss_differential_age,
             )
 
         def _map_measurement(self, pose: Pose2D | None, state: str, accepted: bool, source: str, now: float) -> MapPoseMeasurement | None:
@@ -275,7 +325,21 @@ def create_node(node_name: str) -> Any:
                 return None
             received_at = self._scan_match_received_at if source == "scan_match" else self._amcl_received_at
             fresh = received_at is not None and now - received_at <= self._timeout
-            return MapPoseMeasurement(pose, pose.timestamp, state, fresh, accepted, source)
+            covariance = self._amcl_covariance if source == "amcl" else None
+            return MapPoseMeasurement(
+                pose,
+                pose.timestamp,
+                state,
+                fresh,
+                accepted,
+                source,
+                self._lidar_geometry_score,
+                self._lidar_temporal_match_ratio,
+                covariance,
+                self._scan_match_score if source == "scan_match" else None,
+                self._scan_match_inlier_ratio if source == "scan_match" else None,
+                self._scan_match_mean_distance if source == "scan_match" else None,
+            )
 
         def _tick(self) -> None:
             now = self._now()
@@ -336,6 +400,9 @@ def create_node(node_name: str) -> Any:
                 "alignment_ready": self._core.alignment is not None,
                 "global_anchored": output.global_anchored,
                 "uncertainty_model": "POC_HEURISTIC_NOT_CALIBRATED_COVARIANCE",
+                "measurement_confidence": output.measurement_confidence,
+                "adaptive_position_uncertainty": output.adaptive_position_uncertainty,
+                "adaptive_yaw_uncertainty": output.adaptive_yaw_uncertainty,
                 "map_to_odom_x": output.map_to_odom.x if output.map_to_odom else None,
                 "map_to_odom_y": output.map_to_odom.y if output.map_to_odom else None,
                 "map_to_odom_yaw": output.map_to_odom.yaw if output.map_to_odom else None,
