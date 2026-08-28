@@ -23,6 +23,7 @@ from multisource_fusion_core import (  # noqa: E402
     MultisourceFusionCore,
     Pose2D,
 )
+from diagnostic_level import normalize_diagnostic_level  # noqa: E402
 
 
 def _finite(value: object) -> bool:
@@ -253,7 +254,8 @@ def create_node(node_name: str) -> Any:
             self._lidar_geometry_score = self._float_value(values, "geometry_score")
             self._lidar_temporal_match_ratio = self._float_value(values, "temporal_match_ratio")
             valid_ratio = self._float_value(values, "valid_ratio")
-            if int(selected.level) >= 2 or valid_ratio is not None and valid_ratio <= 0.0:
+            level = normalize_diagnostic_level(selected.level, default=3)
+            if level >= 2 or valid_ratio is not None and valid_ratio <= 0.0:
                 self._lidar_state = "REJECTED"
             elif self._lidar_geometry_score is not None and self._lidar_geometry_score < 0.2:
                 self._lidar_state = "DEGRADED"
@@ -294,7 +296,8 @@ def create_node(node_name: str) -> Any:
                 return
             values = {str(item.key): str(item.value) for item in selected.values}
             self._scan_match_accepted = _bool_value(_value(values, "accepted", "false"))
-            self._scan_match_state = "GOOD" if self._scan_match_accepted and int(selected.level) < 2 else "REJECTED"
+            level = normalize_diagnostic_level(selected.level, default=3)
+            self._scan_match_state = "GOOD" if self._scan_match_accepted and level < 2 else "REJECTED"
             self._scan_match_score = self._float_value(values, "score")
             self._scan_match_inlier_ratio = self._float_value(values, "inlier_ratio")
             self._scan_match_mean_distance = self._float_value(values, "mean_distance")

@@ -18,6 +18,7 @@ from navigation_health_core import (  # noqa: E402
     NavigationHealthInput,
     parse_signal_diagnostic,
 )
+from diagnostic_level import normalize_diagnostic_level  # noqa: E402
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -158,7 +159,7 @@ def create_node(node_name: str) -> Any:
             observation = parse_signal_diagnostic(
                 signal,
                 values,
-                int(selected.level),
+                normalize_diagnostic_level(selected.level, default=3),
                 received_at,
                 received_at,
                 self._timeout,

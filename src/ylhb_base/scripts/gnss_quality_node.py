@@ -21,6 +21,7 @@ from gnss_quality_gate import (  # noqa: E402
     GnssQualityGate,
     parse_status_values,
 )
+from diagnostic_level import normalize_diagnostic_level  # noqa: E402
 
 
 def _stamp_to_seconds(stamp: Any) -> float:
@@ -119,7 +120,10 @@ def create_node(node_name: str) -> Any:
                 self._latest_status = None
                 return
             values = {str(item.key): str(item.value) for item in selected.values}
-            parsed = parse_status_values(values, int(selected.level))
+            parsed = parse_status_values(
+                values,
+                normalize_diagnostic_level(selected.level, default=3),
+            )
             message_stamp = _stamp_to_seconds(message.header.stamp) if _finite_stamp(message.header.stamp) else None
             self._latest_status = {
                 "parsed": parsed,

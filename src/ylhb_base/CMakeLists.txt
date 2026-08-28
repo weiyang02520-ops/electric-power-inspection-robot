@@ -104,6 +104,7 @@ install(TARGETS
 install(PROGRAMS
   scripts/vision_node.py
   scripts/auto_align.py
+  scripts/diagnostic_level.py
   scripts/lidar_robust_features.py
   scripts/gnss_quality_gate.py
   scripts/active_relocalization_core.py
@@ -178,6 +179,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_bringup_imu_detection test/test_bringup_imu_detection.py)
   ament_add_pytest_test(test_bringup_rtk_config test/test_bringup_rtk_config.py)
   ament_add_pytest_test(test_bind_usb_rtk test/test_bind_usb_rtk.py)
+  ament_add_pytest_test(test_diagnostic_level test/test_diagnostic_level.py)
   ament_add_pytest_test(test_robot_geometry test/test_robot_geometry.py)
   ament_add_pytest_test(test_slam_config test/test_slam_config.py)
   ament_add_pytest_test(test_nav2_localization_config test/test_nav2_localization_config.py)
