@@ -52,11 +52,16 @@ def _git(repo_root: Path, *args: str) -> str:
         return ""
 
 
-def _stop_process(process: subprocess.Popen[str] | None, label: str, log_path: Path) -> int | None:
+def _stop_process(
+    process: subprocess.Popen[str] | None,
+    label: str,
+    log_path: Path,
+    graceful_signal: int = signal.SIGINT,
+) -> int | None:
     if process is None or process.poll() is not None:
         return None if process is None else process.returncode
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        os.killpg(os.getpgid(process.pid), graceful_signal)
         process.wait(timeout=8.0)
     except (ProcessLookupError, TimeoutError, subprocess.TimeoutExpired):
         try:
@@ -248,7 +253,15 @@ def run_one(
         # process' rclpy context.  This avoids shutdown-time callbacks in the
         # child nodes observing an already-invalid context.
         _stop_process(bag, "rosbag", logs_dir / "rosbag.log")
-        _stop_process(integration, "integration", logs_dir / "integration.log")
+        # SIGTERM avoids duplicate Python rclpy shutdown handlers in the
+        # independently launched child nodes; rosbag keeps SIGINT so it can
+        # flush its metadata cleanly.
+        _stop_process(
+            integration,
+            "integration",
+            logs_dir / "integration.log",
+            graceful_signal=signal.SIGTERM,
+        )
         if executor is not None:
             try:
                 executor.shutdown()
