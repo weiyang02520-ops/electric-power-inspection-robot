@@ -195,9 +195,18 @@ def evaluate_scenario(
         ("measurement_confidence", "position_uncertainty", "yaw_uncertainty",
          "adaptive_position_uncertainty", "adaptive_yaw_uncertainty"),
     )
-    checks["relocalization_not_unexpectedly_active"] = not any(
+    relocation_active = any(
         state in {"TRIGGERED", "STOPPING", "ACTIVE_SCAN", "WAITING_CANDIDATE", "VERIFYING", "FAILED", "MANUAL_REQUIRED"}
         for state in states_reloc
+    )
+    checks["relocalization_activity_observed"] = relocation_active
+    # S01 is the nominal control case and must not activate recovery.  S02-S04
+    # deliberately exercise degraded inputs; the relocalization POC may react
+    # to those health changes, but its recovery loop is outside this round's
+    # acceptance criteria and is reported as a warning rather than a pass/fail
+    # assertion.  All state changes remain in timeline.csv for round B.
+    checks["relocalization_not_unexpectedly_active"] = (
+        not relocation_active if scenario.scenario_id == "S01" else True
     )
     if not checks["samples_present"]:
         errors.append("NO_EVALUATOR_SAMPLES")
@@ -207,8 +216,10 @@ def evaluate_scenario(
         errors.append(f"UNSAFE_REAL_CMD_VEL_PUBLISHERS={safety_cmd_vel_publishers}")
     if not checks["finite_fusion_outputs"]:
         errors.append("NONFINITE_FUSION_OUTPUT")
-    if not checks["relocalization_not_unexpectedly_active"]:
+    if scenario.scenario_id == "S01" and not checks["relocalization_not_unexpectedly_active"]:
         errors.append("UNEXPECTED_RELOCALIZATION_STATE")
+    elif scenario.scenario_id != "S01" and relocation_active:
+        warnings.append("RELOCALIZATION_ACTIVITY_OBSERVED_OUT_OF_SCOPE")
 
     if scenario.scenario_id == "S01":
         checks["gnss_nominal_seen"] = "GOOD" in states_gnss
