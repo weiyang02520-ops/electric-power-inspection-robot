@@ -181,7 +181,6 @@ def run_one(
         from rclpy.executors import SingleThreadedExecutor
 
         rclpy.init(args=None)
-        evaluator = create_evaluator(scenario, run_dir)
         injector = create_injector(scenario)
         # Publish one nominal/phase-zero frame immediately.  Without this
         # prewarm, the integration's health timers can observe a completely
@@ -190,8 +189,20 @@ def run_one(
         # input and does not alter any production node or threshold.
         injector._tick()
         executor = SingleThreadedExecutor()
-        executor.add_node(evaluator)
         executor.add_node(injector)
+        # Let the integration consume a few complete sensor cycles before the
+        # measured scenario clock starts.  This removes DDS/startup ordering
+        # races while keeping the scenario phase zero aligned to the first
+        # recorded evaluator sample.
+        warmup_deadline = time.monotonic() + 1.5
+        while time.monotonic() < warmup_deadline:
+            executor.spin_once(timeout_sec=0.1)
+            if integration.poll() is not None:
+                integration_alive = False
+        injector._start = time.monotonic()
+        injector._last_map = 0.0
+        evaluator = create_evaluator(scenario, run_dir)
+        executor.add_node(evaluator)
         deadline = time.monotonic() + scenario.duration_sec + settle_sec
         while time.monotonic() < deadline:
             executor.spin_once(timeout_sec=0.1)
