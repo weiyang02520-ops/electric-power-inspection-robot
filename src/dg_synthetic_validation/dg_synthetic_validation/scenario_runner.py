@@ -244,6 +244,11 @@ def run_one(
         write_result(run_dir, result)
         return run_dir, result
     finally:
+        # Stop the external ROS launch and rosbag before tearing down this
+        # process' rclpy context.  This avoids shutdown-time callbacks in the
+        # child nodes observing an already-invalid context.
+        _stop_process(bag, "rosbag", logs_dir / "rosbag.log")
+        _stop_process(integration, "integration", logs_dir / "integration.log")
         if executor is not None:
             try:
                 executor.shutdown()
@@ -262,8 +267,6 @@ def run_one(
                 rclpy.shutdown()
         except Exception:
             pass
-        _stop_process(bag, "rosbag", logs_dir / "rosbag.log")
-        _stop_process(integration, "integration", logs_dir / "integration.log")
         integration_log.close()
         bag_log.close()
 
