@@ -183,6 +183,12 @@ def run_one(
         rclpy.init(args=None)
         evaluator = create_evaluator(scenario, run_dir)
         injector = create_injector(scenario)
+        # Publish one nominal/phase-zero frame immediately.  Without this
+        # prewarm, the integration's health timers can observe a completely
+        # empty graph for their first tick and enter recovery before the
+        # synthetic timer's first 100 ms callback.  This is still sensor-only
+        # input and does not alter any production node or threshold.
+        injector._tick()
         executor = SingleThreadedExecutor()
         executor.add_node(evaluator)
         executor.add_node(injector)
