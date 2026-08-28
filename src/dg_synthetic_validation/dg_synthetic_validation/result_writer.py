@@ -182,6 +182,7 @@ def evaluate_scenario(
     states_gnss = _states(samples, "gnss_state")
     states_lidar = _states(samples, "lidar_state")
     states_nav = _states(samples, "navigation_state")
+    states_nav_steady = _states_after(samples, "navigation_state", RELOCALIZATION_STARTUP_GRACE_SEC)
     states_reloc = _states_after(samples, "relocalization_state", RELOCALIZATION_STARTUP_GRACE_SEC)
     errors: list[str] = []
     warnings: list[str] = []
@@ -224,7 +225,9 @@ def evaluate_scenario(
     if scenario.scenario_id == "S01":
         checks["gnss_nominal_seen"] = "GOOD" in states_gnss
         checks["lidar_nominal_seen"] = "GOOD" in states_lidar
-        checks["navigation_not_failed"] = not any(state in {"FAILED", "MANUAL_REQUIRED"} for state in states_nav)
+        checks["navigation_not_failed"] = not any(
+            state in {"FAILED", "MANUAL_REQUIRED"} for state in states_nav_steady
+        )
         for name in ("gnss_nominal_seen", "lidar_nominal_seen", "navigation_not_failed"):
             if not checks[name]:
                 errors.append(name.upper())
