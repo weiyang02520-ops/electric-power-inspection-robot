@@ -25,6 +25,12 @@ TRUTH_LABELS = {
     "performance_claim_label": "NOT_COMPETITION_PERFORMANCE_EVIDENCE",
 }
 
+# The integration launch is already alive when the evaluator starts, but the
+# first diagnostic cycle can still precede the synthetic sensor publishers.
+# Ignore only this bounded startup window when asserting that relocalization
+# was not unexpectedly activated; all samples remain recorded in the CSV.
+RELOCALIZATION_STARTUP_GRACE_SEC = 2.0
+
 SAMPLE_COLUMNS = [
     "scenario_id", "phase", "elapsed_time", "ros_timestamp",
     "gnss_state", "gnss_decision", "gnss_satellites", "gnss_hdop",
@@ -112,6 +118,15 @@ def _states(samples: Iterable[dict[str, Any]], key: str) -> list[str]:
     return [str(row.get(key, "")).upper() for row in samples if row.get(key) not in (None, "")]
 
 
+def _states_after(samples: Iterable[dict[str, Any]], key: str, elapsed_min: float) -> list[str]:
+    return [
+        str(row.get(key, "")).upper()
+        for row in samples
+        if row.get(key) not in (None, "")
+        and float(row.get("elapsed_time", 0.0) or 0.0) >= elapsed_min
+    ]
+
+
 def _has_in_order(values: list[str], sequence: tuple[str, ...]) -> bool:
     index = 0
     for value in values:
@@ -167,7 +182,7 @@ def evaluate_scenario(
     states_gnss = _states(samples, "gnss_state")
     states_lidar = _states(samples, "lidar_state")
     states_nav = _states(samples, "navigation_state")
-    states_reloc = _states(samples, "relocalization_state")
+    states_reloc = _states_after(samples, "relocalization_state", RELOCALIZATION_STARTUP_GRACE_SEC)
     errors: list[str] = []
     warnings: list[str] = []
     checks: dict[str, bool] = {}
@@ -254,6 +269,10 @@ def evaluate_scenario(
         "errors": errors,
         "warnings": warnings,
         "important_transitions": _important_transitions(samples),
+        "evaluation_notes": {
+            "relocalization_startup_grace_sec": RELOCALIZATION_STARTUP_GRACE_SEC,
+            "startup_samples_retained": True,
+        },
     }
 
 
