@@ -1,0 +1,77 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Reference Frame: map
+      Plane Cell Count: 20
+      Cell Size: 1
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Map
+      Topic: /map
+      Alpha: 0.7
+    - Class: rviz_default_plugins/LaserScan
+      Enabled: true
+      Name: Raw Scan
+      Topic: /scan
+      Style: Points
+      Size (Pixels): 3
+      Color: 255; 255; 0
+    - Class: rviz_default_plugins/LaserScan
+      Enabled: true
+      Name: Filtered Scan
+      Topic: /dg/lidar/filtered_scan
+      Style: Points
+      Size (Pixels): 3
+      Color: 0; 255; 255
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: Odometry
+      Topic: /odom
+      Shape:
+        Alpha: 1
+        Axes Length: 0.4
+        Axes Radius: 0.03
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Fused Pose
+      Topic: /dg/fusion/pose
+      Shape: Arrow
+      Color: 255; 0; 0
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: AMCL Pose
+      Topic: /amcl_pose
+      Shape: Axes
+      Color: 0; 255; 0
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Angle: 0
+      Scale: 40
+      X: 0
+      Y: 0
+Window Geometry:
+  Height: 900
+  Width: 1400

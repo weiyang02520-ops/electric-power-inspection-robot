@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .evaluator_node import create_node as create_evaluator
+from .plot_results import generate_plots
 from .result_writer import evaluate_scenario, write_result
 from .scenario_schema import Scenario, load_scenario
 from .synthetic_injector_node import create_node as create_injector
@@ -146,6 +147,7 @@ def run_one(
     injector = None
     executor = None
     integration_alive = False
+    startup_real_cmd_vel_publishers = 0
     try:
         integration = subprocess.Popen(
             integration_command,
@@ -159,6 +161,8 @@ def run_one(
             integration_alive = False
         else:
             integration_alive = True
+        # Safety gate: the integration must not expose the real /cmd_vel topic.
+        startup_real_cmd_vel_publishers = _topic_publisher_count("/cmd_vel")
         bag_command = ["ros2", "bag", "record", "-o", str(run_dir / "rosbag"), *RECORDED_TOPICS]
         bag = subprocess.Popen(
             bag_command,
@@ -186,6 +190,13 @@ def run_one(
         evaluator.finish()
         safety_publishers = _topic_publisher_count("/cmd_vel")
         result = evaluate_scenario(scenario, evaluator.recorder.samples, safety_publishers, integration_alive)
+        if startup_real_cmd_vel_publishers != 0:
+            result["errors"].append(
+                f"UNSAFE_REAL_CMD_VEL_PUBLISHERS_AT_START={startup_real_cmd_vel_publishers}"
+            )
+            result["failures"] = result["errors"]
+            result["result"] = "FAIL"
+            result["overall_result"] = "FAIL"
         result.update({
             "start_time": datetime.now(timezone.utc).isoformat(),
             "duration": scenario.duration_sec,
@@ -199,7 +210,13 @@ def run_one(
                 "logs": str(logs_dir),
             },
         })
+        plots = generate_plots(run_dir)
+        result["visualization"] = plots
+        result["artifacts"]["plots"] = str(run_dir / "plots")
+        if plots.get("warning"):
+            result.setdefault("warnings", []).append(plots["warning"])
         result["real_cmd_vel_publishers"] = safety_publishers
+        result["real_cmd_vel_publishers_at_start"] = startup_real_cmd_vel_publishers
         result["recorded_topics"] = RECORDED_TOPICS
         result["artifact_directory"] = str(run_dir)
         write_result(run_dir, result)
@@ -255,23 +272,38 @@ def _write_summary(results_root: Path, entries: list[tuple[Path, dict[str, Any]]
     results_root.mkdir(parents=True, exist_ok=True)
     summary_csv = results_root / "summary.csv"
     with summary_csv.open("w", newline="", encoding="utf-8") as handle:
-        fields = ["scenario_id", "result", "sample_count", "error_count", "warning_count", "artifact_directory"]
+        fields = [
+            "scenario_id", "scenario", "result", "duration", "sample_count",
+            "failure_count", "error_count", "warning_count", "important_transition",
+            "artifact_directory", "artifact_path",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for path, result in entries:
             writer.writerow({
                 "scenario_id": result.get("scenario_id", path.name),
+                "scenario": result.get("scenario_name", ""),
                 "result": result.get("result", "FAIL"),
+                "duration": result.get("duration", result.get("duration_sec", "")),
                 "sample_count": result.get("sample_count", 0),
+                "failure_count": len(result.get("failures", result.get("errors", []))),
                 "error_count": len(result.get("errors", [])),
                 "warning_count": len(result.get("warnings", [])),
+                "important_transition": "; ".join(result.get("important_transitions", [])),
                 "artifact_directory": str(path),
+                "artifact_path": str(path),
             })
     with (results_root / "summary.md").open("w", encoding="utf-8") as handle:
         handle.write("# DG-202611 Synthetic Validation Summary\n\n")
         handle.write("This is `SYNTHETIC_SOFTWARE_VALIDATION` only: `NOT_REAL_ROBOT_DATA`, `NOT_GAZEBO_DATA`, and `NOT_COMPETITION_PERFORMANCE_EVIDENCE`.\n\n")
         for path, result in entries:
-            handle.write(f"- **{result.get('scenario_id', path.name)}**: **{result.get('result', 'FAIL')}**, samples={result.get('sample_count', 0)}, artifacts=`{path}`\n")
+            transitions = "; ".join(result.get("important_transitions", [])) or "none recorded"
+            handle.write(
+                f"- **{result.get('scenario_id', path.name)}** ({result.get('scenario_name', '')}): "
+                f"**{result.get('result', 'FAIL')}**, duration={result.get('duration', result.get('duration_sec', ''))}s, "
+                f"samples={result.get('sample_count', 0)}, failures={len(result.get('failures', result.get('errors', [])))}, "
+                f"important_transition={transitions}, artifacts=`{path}`\n"
+            )
 
 
 def _paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:

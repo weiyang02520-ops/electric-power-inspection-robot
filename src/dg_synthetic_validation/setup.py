@@ -15,6 +15,7 @@ setup(
         ("share/" + package_name + "/config", glob("config/*.yaml")),
         ("share/" + package_name + "/launch", glob("launch/*.py")),
         ("share/" + package_name + "/docs", glob("docs/*.md")),
+        ("share/" + package_name + "/rviz", glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools", "PyYAML"],
     zip_safe=True,
@@ -29,6 +30,7 @@ setup(
             "synthetic_evaluator_node = dg_synthetic_validation.evaluator_node:main",
             "run_scenario = dg_synthetic_validation.scenario_runner:main",
             "run_all_s01_s04 = dg_synthetic_validation.scenario_runner:run_all_main",
+            "monitor_scenario = dg_synthetic_validation.monitor_node:main",
         ],
     },
 )

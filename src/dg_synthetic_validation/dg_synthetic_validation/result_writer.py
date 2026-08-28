@@ -136,6 +136,27 @@ def _finite_samples(samples: Iterable[dict[str, Any]], keys: tuple[str, ...]) ->
     return True
 
 
+def _important_transitions(samples: list[dict[str, Any]]) -> list[str]:
+    """Summarize observed state changes without inferring absent transitions."""
+    transitions: list[str] = []
+    previous: dict[str, str] = {}
+    for row in samples:
+        elapsed = row.get("elapsed_time", "")
+        for key, label in (("gnss_state", "GNSS"), ("lidar_state", "LiDAR"),
+                           ("navigation_state", "Navigation"), ("relocalization_state", "Relocalization"),
+                           ("fusion_mode", "Fusion")):
+            value = row.get(key)
+            if value in (None, ""):
+                continue
+            state = str(value)
+            if previous.get(key) == state:
+                continue
+            if key in previous:
+                transitions.append(f"{label}: {previous[key]} -> {state} @ {elapsed}s")
+            previous[key] = state
+    return transitions
+
+
 def evaluate_scenario(
     scenario: Scenario,
     samples: list[dict[str, Any]],
@@ -232,6 +253,7 @@ def evaluate_scenario(
         "failures": errors,
         "errors": errors,
         "warnings": warnings,
+        "important_transitions": _important_transitions(samples),
     }
 
 
@@ -254,3 +276,10 @@ def write_result(output_dir: Path, result: dict[str, Any]) -> None:
             handle.write("\n## Errors\n\n" + "\n".join(f"- {item}" for item in result["errors"]) + "\n")
         if result["warnings"]:
             handle.write("\n## Warnings\n\n" + "\n".join(f"- {item}" for item in result["warnings"]) + "\n")
+        visualization = result.get("visualization", {})
+        if visualization:
+            handle.write("\n## Visualization\n\n")
+            for item in visualization.get("files", []):
+                handle.write(f"- PNG: `{item}`\n")
+            if visualization.get("warning"):
+                handle.write(f"- `{visualization['warning']}`\n")
