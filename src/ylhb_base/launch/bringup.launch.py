@@ -376,6 +376,10 @@ def generate_launch_description():
         output='screen',
         condition=use_stm32,
         parameters=[
+            # Node-name-matched block in base_kinematics.yaml supplies the shared
+            # wheel_track. Listed FIRST so the inline dicts below still win on any
+            # key they set; they deliberately do not set wheel_track.
+            base_kinematics_path,
             {'serial_port': base_port},
             {
                 'publish_tf': False,
