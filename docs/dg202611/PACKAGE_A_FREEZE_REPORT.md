@@ -193,3 +193,11 @@ PACKAGE_A_FREEZE_READY       YES
 COMPETITION_METRIC_EVIDENCE  NO
 ```
 
+
+---
+
+FREEZE_ANCHOR: 02af370d99ece040605ec1bee585866e5760f9c6
+BRANCH:        dg202611-synthetic-validation
+PARENT:        57ec8ecff90d4e383e8c5197105bc8d182474245
+FILES:         35 (10 modified, 25 added)
+TREE_STATE:    clean after commit
