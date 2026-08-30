@@ -31,6 +31,9 @@ setup(
             "run_scenario = dg_synthetic_validation.scenario_runner:main",
             "run_all_s01_s04 = dg_synthetic_validation.scenario_runner:run_all_main",
             "monitor_scenario = dg_synthetic_validation.monitor_node:main",
+            "visualization_markers_node = dg_synthetic_validation.visualization_markers_node:main",
+            "capture_evidence = dg_synthetic_validation.evidence_capture:main",
+            "write_evidence_manifest = dg_synthetic_validation.evidence_manifest:main",
         ],
     },
 )

@@ -98,7 +98,7 @@ def _topic_publisher_count(topic: str) -> int:
     return 0
 
 
-def _write_metadata(run_dir: Path, scenario: Scenario, repo_root: Path, integration_command: list[str]) -> None:
+def _write_metadata(run_dir: Path, scenario: Scenario, repo_root: Path, integration_command: list[str], run_class: str = "FINAL") -> None:
     metadata = {
         "scenario_id": scenario.scenario_id,
         "scenario_name": scenario.name,
@@ -119,6 +119,14 @@ def _write_metadata(run_dir: Path, scenario: Scenario, repo_root: Path, integrat
             "performance_claim_label": "NOT_COMPETITION_PERFORMANCE_EVIDENCE",
         },
         "hardware": {"real_robot_connected": False, "gazebo_started": False},
+        "RUN_CLASS": run_class,
+        "NOT_FINAL_EVIDENCE": "TRUE" if run_class == "PRECHECK" else "FALSE",
+        "NOT_FOR_DOCUMENT_CLAIM": "TRUE" if run_class == "PRECHECK" else "FALSE",
+        "EVIDENCE_LEVEL": (
+            "SYNTHETIC SOFTWARE VALIDATION PRECHECK"
+            if run_class == "PRECHECK"
+            else "SYNTHETIC SOFTWARE VALIDATION"
+        ),
     }
     with (run_dir / "metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, ensure_ascii=False)
@@ -130,6 +138,7 @@ def run_one(
     results_root: Path,
     repo_root: Path,
     settle_sec: float = 2.0,
+    run_class: str = "FINAL",
 ) -> tuple[Path, dict[str, Any]]:
     """Run a single scenario and return its artifact directory and result."""
     run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -143,7 +152,7 @@ def run_one(
         "enable_nav2:=false", "enable_multisource_fusion:=true",
         "cmd_vel_output_topic:=/dg/test_cmd_vel",
     ]
-    _write_metadata(run_dir, scenario, repo_root, integration_command)
+    _write_metadata(run_dir, scenario, repo_root, integration_command, run_class)
     integration_log = (logs_dir / "integration.log").open("w", encoding="utf-8")
     bag_log = (logs_dir / "rosbag.log").open("w", encoding="utf-8")
     integration: subprocess.Popen[str] | None = None
@@ -211,14 +220,14 @@ def run_one(
         # Keep the last evaluator sample deterministic and flush CSV files.
         evaluator.finish()
         safety_publishers = _topic_publisher_count("/cmd_vel")
-        result = evaluate_scenario(scenario, evaluator.recorder.samples, safety_publishers, integration_alive)
-        if startup_real_cmd_vel_publishers != 0:
-            result["errors"].append(
-                f"UNSAFE_REAL_CMD_VEL_PUBLISHERS_AT_START={startup_real_cmd_vel_publishers}"
-            )
-            result["failures"] = result["errors"]
-            result["result"] = "FAIL"
-            result["overall_result"] = "FAIL"
+        result = evaluate_scenario(
+            scenario,
+            evaluator.recorder.samples,
+            safety_publishers,
+            integration_alive,
+            run_class=run_class,
+            safety_cmd_vel_publishers_at_start=startup_real_cmd_vel_publishers,
+        )
         result.update({
             "start_time": datetime.now(timezone.utc).isoformat(),
             "duration": scenario.duration_sec,
@@ -252,6 +261,17 @@ def run_one(
             "authenticity_marker": "THIS_IS_SYNTHETIC_SOFTWARE_VALIDATION",
             "scenario_id": scenario.scenario_id,
             "scenario_name": scenario.name,
+            "run_class": run_class,
+            "run_class_markers": {
+                "RUN_CLASS": run_class,
+                "NOT_FINAL_EVIDENCE": "TRUE" if run_class == "PRECHECK" else "FALSE",
+                "NOT_FOR_DOCUMENT_CLAIM": "TRUE" if run_class == "PRECHECK" else "FALSE",
+                "EVIDENCE_LEVEL": (
+                    "SYNTHETIC SOFTWARE VALIDATION PRECHECK"
+                    if run_class == "PRECHECK"
+                    else "SYNTHETIC SOFTWARE VALIDATION"
+                ),
+            },
             "result": "FAIL",
             "overall_result": "FAIL",
             "evidence_level": "SYNTHETIC_SOFTWARE_VALIDATION",
@@ -306,7 +326,7 @@ def _write_summary(results_root: Path, entries: list[tuple[Path, dict[str, Any]]
     summary_csv = results_root / "summary.csv"
     with summary_csv.open("w", newline="", encoding="utf-8") as handle:
         fields = [
-            "scenario_id", "scenario", "result", "duration", "sample_count",
+            "scenario_id", "scenario", "run_class", "result", "duration", "sample_count",
             "failure_count", "error_count", "warning_count", "important_transition",
             "artifact_directory", "artifact_path",
         ]
@@ -316,6 +336,7 @@ def _write_summary(results_root: Path, entries: list[tuple[Path, dict[str, Any]]
             writer.writerow({
                 "scenario_id": result.get("scenario_id", path.name),
                 "scenario": result.get("scenario_name", ""),
+                "run_class": result.get("run_class", "FINAL"),
                 "result": result.get("result", "FAIL"),
                 "duration": result.get("duration", result.get("duration_sec", "")),
                 "sample_count": result.get("sample_count", 0),
@@ -354,6 +375,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--results-root", type=Path)
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--settle-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--run-class",
+        choices=["PRECHECK", "FINAL"],
+        default="FINAL",
+        help="PRECHECK marks the artifacts as not-final evidence",
+    )
     return parser
 
 
@@ -364,7 +391,7 @@ def main(args: list[str] | None = None) -> int:
     scenario_dir, results_root, repo_root = _paths(parsed)
     scenario_file = scenario_dir / f"{parsed.scenario.upper()}.yaml"
     scenario = load_scenario(scenario_file)
-    path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec)
+    path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec, parsed.run_class)
     print(json.dumps({"scenario": scenario.scenario_id, "result": result["result"], "artifacts": str(path)}, ensure_ascii=False))
     return 0 if result["result"] == "PASS" else 1
 
@@ -376,7 +403,7 @@ def run_all_main(args: list[str] | None = None) -> int:
     for scenario_id in ("S01", "S02", "S03", "S04"):
         scenario_file = scenario_dir / f"{scenario_id}.yaml"
         scenario = load_scenario(scenario_file)
-        path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec)
+        path, result = run_one(scenario, scenario_file, results_root, repo_root, parsed.settle_sec, parsed.run_class)
         entries.append((path, result))
         print(json.dumps({"scenario": scenario_id, "result": result["result"], "artifacts": str(path)}, ensure_ascii=False), flush=True)
     _write_summary(results_root, entries)
