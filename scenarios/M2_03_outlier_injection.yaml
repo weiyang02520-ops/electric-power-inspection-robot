@@ -1,0 +1,41 @@
+# M2_03 — Outlier Injection
+
+scenario_id: M2_03
+name: outlier_abnormal_reflection
+duration_sec: 12.0
+seed: 20261213
+rates:
+  sensor_hz: 10.0
+  map_hz: 1.0
+scan:
+  generator: analytic
+plant:
+  enabled: false
+amcl_surrogate:
+  enabled: false
+publish_initialpose: true
+
+phases:
+  - id: CLEAN_BASELINE
+    start_sec: 0.0
+    end_sec: 4.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
+
+  - id: OUTLIER_INJECTION
+    start_sec: 4.0
+    end_sec: 8.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 0.80, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
+
+  - id: OUTLIER_CLEARED
+    start_sec: 8.0
+    end_sec: 12.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}

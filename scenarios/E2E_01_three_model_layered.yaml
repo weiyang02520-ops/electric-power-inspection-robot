@@ -1,0 +1,72 @@
+# E2E_01 — Three Model Layered Decision
+
+scenario_id: E2E_01
+name: three_model_layered_decision_e2e
+duration_sec: 36.0
+seed: 20261231
+rates:
+  sensor_hz: 10.0
+  map_hz: 1.0
+scan:
+  generator: analytic
+plant:
+  enabled: false
+amcl_surrogate:
+  enabled: false
+publish_initialpose: true
+
+# This scenario validates the complete three-model decision chain:
+# 1. MODEL-1 detects GNSS + LiDAR concurrent degradation
+# 2. MODEL-2 produces stable LiDAR evidence and quality score
+# 3. MODEL-1 determines passive confidence insufficient (AMCL cov rises)
+# 4. MODEL-3 triggered, executes active recovery
+# 5. Candidate verification (using MODEL-2 stable features)
+# 6. Safe handoff to MODEL-1
+# 7. MODEL-1 progressive re-entry to NOMINAL
+#
+# Expected evidence:
+# - MODEL-2 geometry_score logged and fed to MODEL-1 health
+# - MODEL-1 fusion mode transitions logged
+# - MODEL-3 state machine transitions logged
+# - All three models' decisions visible in timeline
+
+phases:
+  - id: NOMINAL_BASELINE
+    start_sec: 0.0
+    end_sec: 6.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: GNSS_LIDAR_CONCURRENT_DEGRADATION
+    start_sec: 6.0
+    end_sec: 12.0
+    gnss: {quality: 1, satellites: 4, hdop: 5.0, differential_age: 10.0, fix_available: true}
+    lidar: {mode: narrow, valid_fraction: 0.6, angle_min: -0.15, angle_max: 0.15, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.10, covariance_end: 0.40, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: AMCL_COVARIANCE_CROSSES_THRESHOLD
+    start_sec: 12.0
+    end_sec: 18.0
+    gnss: {quality: 1, satellites: 4, hdop: 5.0, differential_age: 10.0, fix_available: true}
+    lidar: {mode: narrow, valid_fraction: 0.6, angle_min: -0.15, angle_max: 0.15, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.50, covariance_end: 0.70, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: ACTIVE_RECOVERY_PHASE
+    start_sec: 18.0
+    end_sec: 30.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
+
+  - id: PROGRESSIVE_REENTRY
+    start_sec: 30.0
+    end_sec: 36.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}

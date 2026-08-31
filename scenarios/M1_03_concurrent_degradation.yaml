@@ -1,0 +1,41 @@
+# M1_03 — Concurrent GNSS + LiDAR Degradation
+
+scenario_id: M1_03
+name: concurrent_gnss_lidar_degradation
+duration_sec: 24.0
+seed: 20261203
+rates:
+  sensor_hz: 10.0
+  map_hz: 1.0
+scan:
+  generator: analytic
+plant:
+  enabled: false
+amcl_surrogate:
+  enabled: false
+publish_initialpose: true
+
+phases:
+  - id: NOMINAL_BASELINE
+    start_sec: 0.0
+    end_sec: 6.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: CONCURRENT_DEGRADATION
+    start_sec: 6.0
+    end_sec: 18.0
+    gnss: {quality: 1, satellites: 4, hdop: 5.0, differential_age: 10.0, fix_available: true}
+    lidar: {mode: narrow, valid_fraction: 0.7, angle_min: -0.18, angle_max: 0.18, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, covariance_end: 0.70, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: RECOVERY
+    start_sec: 18.0
+    end_sec: 24.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}

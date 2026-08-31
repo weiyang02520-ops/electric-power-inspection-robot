@@ -1,0 +1,51 @@
+# M3_04 — GT Leak Guard
+
+scenario_id: M3_04
+name: gt_leak_guard_validation
+duration_sec: 24.0
+seed: 20261224
+rates:
+  sensor_hz: 10.0
+  map_hz: 1.0
+scan:
+  generator: analytic
+plant:
+  enabled: false
+amcl_surrogate:
+  enabled: false
+publish_initialpose: true
+
+# This scenario validates that GT is NEVER used in online candidate acceptance.
+# Two sub-tests:
+# 1. Good quality but high GT error → must ACCEPT (quality passes, GT not checked)
+# 2. Poor quality but low GT error → must REJECT (quality fails, GT ignored)
+#
+# NOTE: Full validation requires:
+# - Synthetic candidate injection with controlled quality + GT error
+# - Or post-run analysis confirming candidate acceptance logic never touched GT topic
+# This YAML documents the test intent; implementation may need test harness support.
+
+phases:
+  - id: NOMINAL
+    start_sec: 0.0
+    end_sec: 4.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: TRIGGER
+    start_sec: 4.0
+    end_sec: 10.0
+    gnss: {quality: 0, satellites: 0, hdop: 99.0, differential_age: 99.0, fix_available: false}
+    lidar: {mode: narrow, valid_fraction: 0.5, angle_min: -0.1, angle_max: 0.1, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.20, covariance_end: 0.80, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.05}
+
+  - id: ACTIVE_SCAN_GT_GUARD_TEST
+    start_sec: 10.0
+    end_sec: 24.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}

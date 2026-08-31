@@ -1,0 +1,46 @@
+# M2_02 — Dynamic Object (Gazebo Actor Surrogate)
+
+scenario_id: M2_02
+name: dynamic_object_filtering
+duration_sec: 18.0
+seed: 20261212
+rates:
+  sensor_hz: 10.0
+  map_hz: 1.0
+scan:
+  generator: analytic
+plant:
+  enabled: false
+amcl_surrogate:
+  enabled: false
+publish_initialpose: true
+
+# NOTE: This scenario requires Gazebo with dynamic actor.
+# Current analytic scan generator does not model moving objects.
+# For full validation, run in Gazebo with person walking through FOV.
+# This YAML documents expected behavior, actual test requires Gazebo setup.
+
+phases:
+  - id: STATIC_PHASE
+    start_sec: 0.0
+    end_sec: 6.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
+
+  - id: DYNAMIC_OBJECT_PRESENT
+    start_sec: 6.0
+    end_sec: 12.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 0.85, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
+
+  - id: DYNAMIC_CLEARED
+    start_sec: 12.0
+    end_sec: 18.0
+    gnss: {quality: 4, satellites: 12, hdop: 0.8, differential_age: 0.5, fix_available: true}
+    lidar: {mode: normal, valid_fraction: 1.0, angle_min: -3.141592653589793, angle_max: 3.141592653589793, range_m: 3.0}
+    amcl: {publish: true, covariance: 0.05, yaw_covariance: 0.03}
+    odom: {publish: true, linear_x: 0.0}
