@@ -6,8 +6,12 @@ other localization sources (GNSS, LiDAR, odom) remain healthy.
 """
 
 import sys
-sys.path.insert(0, 'C:/Users/peng/dg202611_stage')
-sys.path.insert(0, 'C:/Users/peng/dg202611_stage/relay_repo/src/ylhb_base/scripts')
+from pathlib import Path
+
+# Add scripts directory to path
+SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from multisource_fusion_core import (
     MultisourceFusionCore,

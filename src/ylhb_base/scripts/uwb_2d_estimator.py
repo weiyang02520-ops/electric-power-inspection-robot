@@ -12,7 +12,12 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Tuple
 import sys
-sys.path.insert(0, 'C:/Users/peng/dg202611_stage')
+from pathlib import Path
+
+# Add local scripts directory to path
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from uwb_data_model import (
     UwbRangeObservation,

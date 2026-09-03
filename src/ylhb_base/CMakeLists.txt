@@ -111,6 +111,9 @@ install(PROGRAMS
   scripts/navigation_health_core.py
   scripts/cmd_vel_arbiter_core.py
   scripts/multisource_fusion_core.py
+  scripts/uwb_data_model.py
+  scripts/uwb_2d_estimator.py
+  scripts/uwb_quality_gate.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -193,6 +196,9 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_navigation_protocols test/test_navigation_protocols.py)
   ament_add_pytest_test(test_multisource_fusion_core test/test_multisource_fusion_core.py)
   ament_add_pytest_test(test_multisource_fusion_protocols test/test_multisource_fusion_protocols.py)
+  ament_add_pytest_test(test_uwb_model1_integration test/test_uwb_model1_integration.py)
+  ament_add_pytest_test(test_uwb_model3_compatibility test/test_uwb_model3_compatibility.py)
+  ament_add_pytest_test(test_position_error_evaluator test/test_position_error_evaluator.py)
 endif()
 
 ament_package()

@@ -11,8 +11,12 @@ Tests:
 
 import sys
 import math
-sys.path.insert(0, 'C:/Users/peng/dg202611_stage')
-sys.path.insert(0, 'C:/Users/peng/dg202611_stage/relay_repo/src/ylhb_base/scripts')
+from pathlib import Path
+
+# Add scripts directory to path
+SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from uwb_data_model import UwbRangeObservation, SYNTHETIC_ANCHOR_COORDINATES
 from uwb_2d_estimator import estimate_2d_position
