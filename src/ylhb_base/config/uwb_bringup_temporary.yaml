@@ -1,0 +1,38 @@
+# TEMPORARY UWB BRINGUP CONFIGURATION
+# NOT FORMAL SURVEYED CALIBRATION
+# For initial hardware integration only
+
+/**:
+  ros__parameters:
+    # UWB driver parameters (if uwb_driver_node exists on ubuntu103)
+    # These would be in the actual uwb_driver_node configuration
+    # serial_port: /dev/ttyUSB0
+    # baud_rate: 115200
+
+    # Temporary anchor positions (meters) - NOT FORMAL SURVEY
+    # anchor_a2_x: 0.0
+    # anchor_a2_y: 0.0
+    # anchor_a3_x: 2.40
+    # anchor_a3_y: 0.0
+    # anchor_a4_x: 1.660
+    # anchor_a4_y: 0.745
+
+multisource_fusion_node:
+  ros__parameters:
+    # UWB ROS2 wrapper parameters
+    uwb_enabled: false  # Disabled by default until alignment configured
+    uwb_pose_topic: /dg/uwb/pose
+    uwb_quality_topic: /dg/uwb/quality
+
+    # UWB to map alignment - MUST BE CALIBRATED
+    # Set all to valid numbers to enable UWB fusion
+    # Current values are placeholders (identity transform)
+    uwb_to_map_yaw: 0.0        # radians (0 = no rotation)
+    uwb_to_map_offset_x: 0.0   # meters
+    uwb_to_map_offset_y: 0.0   # meters
+
+    # To enable UWB:
+    # 1. Measure UWB->map alignment (requires reference point in both frames)
+    # 2. Set uwb_to_map_yaw, uwb_to_map_offset_x, uwb_to_map_offset_y
+    # 3. Set uwb_enabled: true
+    # 4. Launch and verify /dg/fusion/status shows UWB_AIDED mode

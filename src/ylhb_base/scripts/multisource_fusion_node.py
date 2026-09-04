@@ -22,6 +22,7 @@ from multisource_fusion_core import (  # noqa: E402
     MapPoseMeasurement,
     MultisourceFusionCore,
     Pose2D,
+    UwbPositionMeasurement,
 )
 from diagnostic_level import normalize_diagnostic_level  # noqa: E402
 
@@ -83,6 +84,13 @@ def create_node(node_name: str) -> Any:
             self.declare_parameter("amcl_pose_topic", "/amcl_pose")
             self.declare_parameter("scan_match_pose_topic", "/scan_match_pose")
             self.declare_parameter("match_quality_topic", "/dg/relocalization/match_quality")
+            self.declare_parameter("uwb_pose_topic", "/dg/uwb/pose")
+            self.declare_parameter("uwb_quality_topic", "/dg/uwb/quality")
+            self.declare_parameter("uwb_enabled", False)
+            self.declare_parameter("uwb_alignment_enabled", False)
+            self.declare_parameter("uwb_to_map_yaw", 0.0)
+            self.declare_parameter("uwb_to_map_offset_x", 0.0)
+            self.declare_parameter("uwb_to_map_offset_y", 0.0)
             self.declare_parameter("fusion_odom_topic", "/dg/fusion/odom")
             self.declare_parameter("fusion_pose_topic", "/dg/fusion/pose")
             self.declare_parameter("fusion_status_topic", "/dg/fusion/status")
@@ -162,6 +170,16 @@ def create_node(node_name: str) -> Any:
             self._scan_match_inlier_ratio: float | None = None
             self._scan_match_mean_distance: float | None = None
 
+            # UWB state
+            self._uwb_enabled = bool(self.get_parameter("uwb_enabled").value)
+            self._uwb_pose: Any | None = None
+            self._uwb_pose_received_at: float | None = None
+            self._uwb_sequence = 0
+            self._uwb_consumed_sequence = 0
+            self._uwb_quality: dict[str, str] = {}
+            self._uwb_quality_received_at: float | None = None
+            self._uwb_alignment_ready = False
+
             self._odom_pub = self.create_publisher(
                 Odometry, str(self.get_parameter("fusion_odom_topic").value), 10
             )
@@ -192,6 +210,15 @@ def create_node(node_name: str) -> Any:
             self.create_subscription(
                 DiagnosticArray, str(self.get_parameter("match_quality_topic").value), self._on_match_quality, 10
             )
+            # UWB subscriptions
+            if self._uwb_enabled:
+                self.create_subscription(
+                    PoseWithCovarianceStamped, str(self.get_parameter("uwb_pose_topic").value), self._on_uwb_pose, 10
+                )
+                self.create_subscription(
+                    DiagnosticArray, str(self.get_parameter("uwb_quality_topic").value), self._on_uwb_quality, 10
+                )
+                self._check_uwb_alignment()
             self._timer = self.create_timer(float(self.get_parameter("timer_period").value), self._tick)
             if bool(self.get_parameter("publish_tf").value):
                 self.get_logger().warn("publish_tf is intentionally ignored; fusion POC never owns map->odom TF")
@@ -208,6 +235,66 @@ def create_node(node_name: str) -> Any:
                 if hint in str(status.name).upper():
                     return status
             return selected
+
+        def _check_uwb_alignment(self) -> None:
+            """Check if UWB->map alignment parameters are configured."""
+            try:
+                if not bool(self.get_parameter("uwb_alignment_enabled").value):
+                    self.get_logger().warn(
+                        "UWB->map alignment not explicitly enabled; UWB injection disabled"
+                    )
+                    self._uwb_alignment_ready = False
+                    return
+
+                yaw = float(self.get_parameter("uwb_to_map_yaw").value)
+                offset_x = float(self.get_parameter("uwb_to_map_offset_x").value)
+                offset_y = float(self.get_parameter("uwb_to_map_offset_y").value)
+
+                # Check if any value is None or NaN
+                if not (_finite(yaw) and _finite(offset_x) and _finite(offset_y)):
+                    self.get_logger().warn("UWB->map alignment not configured (NaN/None), UWB disabled")
+                    self._uwb_alignment_ready = False
+                    return
+
+                self._uwb_alignment_ready = True
+                self.get_logger().info(f"UWB->map alignment ready: yaw={yaw:.3f} rad, offset=({offset_x:.3f}, {offset_y:.3f}) m")
+            except Exception as e:
+                self.get_logger().warn(f"UWB->map alignment check failed: {e}")
+                self._uwb_alignment_ready = False
+
+        def _transform_uwb_to_map(self, uwb_x: float, uwb_y: float) -> tuple[float, float] | None:
+            """Transform UWB frame to map frame using configured 2D rigid transform."""
+            if not self._uwb_alignment_ready:
+                return None
+
+            try:
+                yaw = float(self.get_parameter("uwb_to_map_yaw").value)
+                offset_x = float(self.get_parameter("uwb_to_map_offset_x").value)
+                offset_y = float(self.get_parameter("uwb_to_map_offset_y").value)
+
+                cos_yaw = math.cos(yaw)
+                sin_yaw = math.sin(yaw)
+
+                # 2D rigid transform: R * [uwb_x, uwb_y]^T + [offset_x, offset_y]^T
+                map_x = cos_yaw * uwb_x - sin_yaw * uwb_y + offset_x
+                map_y = sin_yaw * uwb_x + cos_yaw * uwb_y + offset_y
+
+                return (map_x, map_y)
+            except Exception:
+                return None
+
+        def _on_uwb_pose(self, message: Any) -> None:
+            """Callback for /dg/uwb/pose (PoseWithCovarianceStamped)."""
+            self._uwb_pose = message
+            self._uwb_pose_received_at = self._now()
+            self._uwb_sequence += 1
+
+        def _on_uwb_quality(self, message: Any) -> None:
+            """Callback for /dg/uwb/quality (DiagnosticArray)."""
+            selected = self._status(message, "UWB")
+            if selected:
+                self._uwb_quality = {kv.key: kv.value for kv in selected.values}
+                self._uwb_quality_received_at = self._now()
 
         def _on_odom(self, message: Any) -> None:
             now = self._now()
@@ -344,12 +431,72 @@ def create_node(node_name: str) -> Any:
                 self._scan_match_mean_distance if source == "scan_match" else None,
             )
 
+        def _uwb_measurement(self, now: float) -> UwbPositionMeasurement | None:
+            """Construct UWB measurement if available and valid."""
+            if not self._uwb_enabled or not self._uwb_alignment_ready:
+                return None
+
+            if self._uwb_pose is None or self._uwb_pose_received_at is None:
+                return None
+
+            if not self._uwb_quality:
+                return None
+
+            # Check freshness
+            pose_age = now - self._uwb_pose_received_at
+            quality_age = now - self._uwb_quality_received_at if self._uwb_quality_received_at else float('inf')
+
+            if pose_age > self._timeout or quality_age > self._timeout:
+                return None
+
+            # Parse quality
+            accepted = _bool_value(_value(self._uwb_quality, "accepted", "false"))
+            state = _value(self._uwb_quality, "current_state", "REJECTED").upper()
+
+            if not accepted or state not in ["GOOD", "DEGRADED"]:
+                return None
+
+            # Transform UWB -> map
+            uwb_x = float(self._uwb_pose.pose.pose.position.x)
+            uwb_y = float(self._uwb_pose.pose.pose.position.y)
+
+            transformed = self._transform_uwb_to_map(uwb_x, uwb_y)
+            if transformed is None:
+                return None
+
+            map_x, map_y = transformed
+
+            # Extract metrics
+            try:
+                residual_rms = float(_value(self._uwb_quality, "residual_rms", "0"))
+                geometry_score = float(_value(self._uwb_quality, "geometry_score", "0"))
+                unique_anchor_count = int(_value(self._uwb_quality, "unique_anchor_count", "0"))
+                confidence = float(_value(self._uwb_quality, "confidence", "0"))
+            except (ValueError, TypeError):
+                return None
+
+            stamp = _stamp_to_seconds(self._uwb_pose.header.stamp) or now
+
+            return UwbPositionMeasurement(
+                x=map_x,
+                y=map_y,
+                timestamp=stamp,
+                state=state,
+                fresh=True,
+                accepted=accepted,
+                residual_rms=residual_rms,
+                geometry_score=geometry_score,
+                unique_anchor_count=unique_anchor_count,
+                confidence=confidence,
+            )
+
         def _tick(self) -> None:
             now = self._now()
             new_odom = self._local_odom if self._odom_sequence != self._odom_consumed_sequence else None
             new_gnss = self._gnss_measurement(now) if self._gnss_sequence != self._gnss_consumed_sequence else None
             new_scan_pose = self._scan_match_pose if self._scan_match_sequence != self._scan_match_consumed_sequence else None
             new_amcl_pose = self._amcl_pose if self._amcl_sequence != self._amcl_consumed_sequence else None
+            new_uwb = self._uwb_measurement(now) if self._uwb_sequence != self._uwb_consumed_sequence else None
             scan = self._map_measurement(new_scan_pose, self._scan_match_state, self._scan_match_accepted, "scan_match", now)
             amcl = self._map_measurement(new_amcl_pose, self._amcl_state, self._amcl_state == "GOOD", "amcl", now)
             output = self._core.process(
@@ -359,12 +506,14 @@ def create_node(node_name: str) -> Any:
                     gnss=new_gnss,
                     scan_match_pose=scan,
                     amcl_pose=amcl,
+                    uwb=new_uwb,
                 )
             )
             self._odom_consumed_sequence = self._odom_sequence
             self._gnss_consumed_sequence = self._gnss_sequence
             self._scan_match_consumed_sequence = self._scan_match_sequence
             self._amcl_consumed_sequence = self._amcl_sequence
+            self._uwb_consumed_sequence = self._uwb_sequence
             self._publish(output)
 
         def _publish(self, output: Any) -> None:

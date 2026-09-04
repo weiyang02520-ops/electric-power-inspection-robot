@@ -114,6 +114,7 @@ install(PROGRAMS
   scripts/uwb_data_model.py
   scripts/uwb_2d_estimator.py
   scripts/uwb_quality_gate.py
+  scripts/uwb_driver_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -199,6 +200,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_uwb_model1_integration test/test_uwb_model1_integration.py)
   ament_add_pytest_test(test_uwb_model3_compatibility test/test_uwb_model3_compatibility.py)
   ament_add_pytest_test(test_position_error_evaluator test/test_position_error_evaluator.py)
+  ament_add_pytest_test(test_uwb_ros2_wrapper test/test_uwb_ros2_wrapper.py)
 endif()
 
 ament_package()
